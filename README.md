@@ -24,6 +24,7 @@ def main() -> int:
 | [docs/roadmap.md](docs/roadmap.md) | 全 20 章のロードマップ |
 | [docs/chapters/ch01-setup-and-minimal-compiler.md](docs/chapters/ch01-setup-and-minimal-compiler.md) | **第1章：ここから手を動かす** |
 | [docs/chapters/ch02-arithmetic-and-precedence.md](docs/chapters/ch02-arithmetic-and-precedence.md) | 第2章：四則演算と演算子の優先順位 |
+| [docs/chapters/ch03-diagnostics.md](docs/chapters/ch03-diagnostics.md) | 第3章：エラー報告と診断メッセージ |
 
 ### 設計ドキュメント
 
@@ -43,7 +44,7 @@ def main() -> int:
 
 ## 現在の到達状況
 
-**第2章 完了** — 演算子の優先順位を正しく扱う電卓として動きます。
+**第3章 完了** — 演算子の優先順位を正しく扱う電卓 ＋ 親切な診断メッセージ。
 
 ```bash
 $ make
@@ -53,6 +54,25 @@ $ ./t; echo $?
 42
 ```
 
+間違えると、こう教えてくれます。
+
+```
+$ echo '(1 + 2' > t.my && ./build/mythonc t.my -o t
+error: 閉じ括弧 ')' がありません
+  --> t.my:1:7
+   |
+ 1 | (1 + 2
+   |       ^ ここに ')' が必要です
+   |
+note: 対応する '(' はここです
+  --> t.my:1:1
+   |
+ 1 | (1 + 2
+   | ^
+   |
+   = ヒント: 括弧の対応を確認してください
+```
+
 | 段階 | 状態 |
 |---|---|
 | ① 字句解析 | 整数リテラル（10/16/8/2 進）/ 記号 15 種 / コメント / 位置情報 |
@@ -60,8 +80,9 @@ $ ./t; echo $?
 | ③ 型検査 | 第5章で追加 |
 | ④ コード生成 | LLVM IR テキスト出力（4 バッファ方式） |
 | ⑤ 実行ファイル | clang 連携 |
+| 診断 | 位置・ラベル・関連位置（note）・ヒント / UTF-8 対応 |
 
-テスト **34 件**（正常系 23 + エラー系 11）、ビルド警告 0、ASan/UBSan クリーン。
+テスト **36 件**（正常系 23 + エラー系 13）、ビルド警告 0、ASan/UBSan クリーン。
 
 進捗の詳細は [docs/roadmap.md](docs/roadmap.md) の進捗表を参照してください。
 

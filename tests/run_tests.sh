@@ -61,7 +61,9 @@ for case_file in "${CASES[@]}"; do
 
     # ── 期待値をヘッダコメントから読み取る ──
     want_exit="$(sed -n 's/^# *EXIT: *//p'   "$case_file" | head -1)"
-    want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file" | head -1)"
+    # ERROR は複数行書ける。すべてが stderr に含まれることを要求する。
+    # 診断メッセージの note: / ヒント: 行まで検証できるようにするため。
+    want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file")"
     # OUTPUT は複数行を許す
     want_output="$(sed -n 's/^# *OUTPUT: *//p' "$case_file")"
 
@@ -79,13 +81,28 @@ for case_file in "${CASES[@]}"; do
         if [ "$compile_rc" -eq 0 ]; then
             report_fail "$name" "コンパイルが成功してしまいました（失敗を期待）
 期待するエラー: $want_error"
-        elif ! printf '%s' "$compile_err" | grep -qF -- "$want_error"; then
-            report_fail "$name" "エラーメッセージが期待と違います
-期待: $want_error
-実際:
+            continue
+        fi
+
+        # 期待する文字列を 1 行ずつ確認する
+        missing=""
+        nchecks=0
+        while IFS= read -r want; do
+            [ -z "$want" ] && continue
+            nchecks=$((nchecks + 1))
+            printf '%s' "$compile_err" | grep -qF -- "$want" || missing="$missing
+  - $want"
+        done <<EOF_WANT
+$want_error
+EOF_WANT
+
+        if [ -n "$missing" ]; then
+            report_fail "$name" "エラー出力に含まれていない期待文字列があります:$missing
+実際の出力:
 $compile_err"
         else
-            printf "  %sok%s    %s %s(error)%s\n" "$C_OK" "$C_END" "$name" "$C_DIM" "$C_END"
+            printf "  %sok%s    %s %s(error x%d)%s\n" "$C_OK" "$C_END" "$name" \
+                   "$C_DIM" "$nchecks" "$C_END"
             pass=$((pass + 1))
         fi
         continue

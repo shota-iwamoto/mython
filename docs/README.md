@@ -48,7 +48,7 @@
 |---|---|---|
 | [第1章](chapters/ch01-setup-and-minimal-compiler.md) | 環境構築と最小コンパイラ（整数を返す） | ✅ 完成 |
 | [第2章](chapters/ch02-arithmetic-and-precedence.md) | 四則演算と演算子の優先順位 | ✅ 完成 |
-| 第3章 | エラー報告と診断メッセージ | ⬜ 未着手 |
+| [第3章](chapters/ch03-diagnostics.md) | エラー報告と診断メッセージ | ✅ 完成 |
 | 第4章 | インデント構文（NEWLINE / INDENT / DEDENT） | ⬜ 未着手 |
 | 第5章 | 変数と型検査パスの導入 | ⬜ 未着手 |
 | 第6章 | bool・比較演算・論理演算 | ⬜ 未着手 |

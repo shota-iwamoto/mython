@@ -60,7 +60,6 @@ bool tok_is(Token *tok, const char *op);
 // --dump-tokens の出力
 void dump_tokens(TokenVec toks);
 
-// 位置情報付きエラー。util.h の error_at_pos() に Token を渡すラッパ。
-_Noreturn void error_at(Token *tok, const char *fmt, ...);
+// 位置情報付きのエラー報告は diag.h にあります（error_at / diag_fail）。
 
 #endif  // MYTHON_LEXER_H

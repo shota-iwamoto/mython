@@ -1,6 +1,8 @@
 #include "lexer.h"
 
 #include <ctype.h>
+
+#include "diag.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -16,7 +18,12 @@ typedef struct {
     const char *p;           // 現在の読み取り位置
     const char *line_start;  // 現在の行の先頭
     int line;                // 現在の行番号（1 起算）
-    TokenVec out;            // 出力先
+
+    // 直前の行（EOF トークンの位置決めに使う。下の tokenize() 末尾を参照）
+    const char *prev_line_start;
+    int prev_line;
+
+    TokenVec out;  // 出力先
 } Lexer;
 
 // ── TokenVec の操作 ────────────────────────────────────────
@@ -109,13 +116,18 @@ static void read_int(Lexer *lx) {
     // 接頭辞の後に有効な数字が 1 つもない（0x や 0b だけ）
     if (n == 0) {
         Token tmp = span_token(lx, start, lx->p);
-        error_at(&tmp, "数字がありません（基数 %d のリテラル）", base);
+        const char *valid = base == 16 ? "0-9 a-f A-F"
+                          : base == 8  ? "0-7"
+                                       : "0-1";
+        error_at_hint(&tmp, diag_fmt("基数 %d で使える数字は %s です", base, valid),
+                      "数値リテラルに数字がありません");
     }
 
     // 数字の直後が識別子文字なら、それは 123abc や 0xFFg のような不正なリテラル
     if (isalpha((unsigned char)*lx->p) || *lx->p == '_') {
         Token tmp = span_token(lx, start, lx->p + 1);
-        error_at(&tmp, "数値リテラルの直後に文字が続いています");
+        error_at_hint(&tmp, "数値と識別子の間に空白が必要かもしれません",
+                      "数値リテラルの直後に文字が続いています");
     }
 
     // 文字列 → long long。オーバーフローを errno で検出する。
@@ -127,7 +139,9 @@ static void read_int(Lexer *lx) {
     long long v = strtoll(digits, &end, base);
     if (errno == ERANGE) {
         Token tmp = span_token(lx, start, lx->p);
-        error_at(&tmp, "整数リテラルが int の範囲 (64bit) を超えています");
+        error_at_hint(&tmp,
+                      "int が表せるのは -9223372036854775808 〜 9223372036854775807 です",
+                      "整数リテラルが int の範囲 (64bit) を超えています");
     }
 
     Token *t = tv_push(lx, TK_INT, start, (int)(lx->p - start));
@@ -175,6 +189,10 @@ TokenVec tokenize(const char *file, const char *src) {
         // 改行：行番号を進める
         // 第4章ではここで NEWLINE トークンと INDENT/DEDENT を生成します。
         if (*lx.p == '\n') {
+            // 今終えた行を「直前の行」として覚えておく（EOF の位置決め用）
+            lx.prev_line_start = lx.line_start;
+            lx.prev_line = lx.line;
+
             lx.p++;
             lx.line++;
             lx.line_start = lx.p;
@@ -190,7 +208,10 @@ TokenVec tokenize(const char *file, const char *src) {
         // タブは字句エラー（言語仕様 2.4：インデントの曖昧さを排除するため）
         if (*lx.p == '\t') {
             Token tmp = span_token(&lx, lx.p, lx.p + 1);
-            error_at(&tmp, "タブ文字は使えません。半角スペースを使ってください");
+            error_at_hint(&tmp,
+                          "タブ幅の解釈によってインデントの意味が変わるのを防ぐため、"
+                          "Mython ではタブを禁止しています（半角スペース 4 個を推奨）",
+                          "タブ文字は使えません");
         }
 
         // コメント：# から行末まで（改行は次の周回で処理する）
@@ -208,14 +229,44 @@ TokenVec tokenize(const char *file, const char *src) {
         // 記号
         if (read_punct(&lx)) continue;
 
-        // ここに来たら、現時点では扱えない文字
+        // ここに来たら、現時点では扱えない文字。
+        // 非 ASCII バイトは '%c' で出すと化けるので、16 進で示す。
         Token tmp = span_token(&lx, lx.p, lx.p + 1);
-        error_at(&tmp, "解釈できない文字です: '%c'", *lx.p);
+        unsigned char c = (unsigned char)*lx.p;
+        if (c < 0x20 || c >= 0x7f)
+            error_at(&tmp, "解釈できない文字です (0x%02X)", c);
+        error_at(&tmp, "解釈できない文字です: '%c'", c);
     }
 
     // 入力の終わりを示すトークンを必ず 1 個置く。
     // これがあると、パーサが「配列の終わりを越えたか」を毎回気にせずに済む。
-    tv_push(&lx, TK_EOF, lx.p, 0);
+    //
+    // ★ EOF の「位置」に一手間かける。
+    //
+    //   read_file() が末尾の改行を保証しているため、素朴に現在位置を使うと
+    //   EOF は「最後の行の次にある空行」を指してしまいます。すると
+    //   「閉じ括弧がありません」のエラーで抜粋が空行になり、役に立ちません:
+    //
+    //       --> t.my:3:1
+    //        |
+    //      3 |
+    //        | ^ ここに ')' が必要です     ← 何も見えない
+    //
+    //   そこで、現在行が空なら直前の行の末尾を指すようにします:
+    //
+    //       --> t.my:2:7
+    //        |
+    //      2 | (1 + 2
+    //        |       ^ ここに ')' が必要です   ← 読める！
+    if (lx.p == lx.line_start && lx.prev_line_start) {
+        lx.line_start = lx.prev_line_start;
+        lx.line = lx.prev_line;
+        const char *eol = lx.prev_line_start;
+        while (*eol && *eol != '\n') eol++;
+        tv_push(&lx, TK_EOF, eol, 0);
+    } else {
+        tv_push(&lx, TK_EOF, lx.p, 0);
+    }
     return lx.out;
 }
 
@@ -254,15 +305,4 @@ void dump_tokens(TokenVec toks) {
     }
 }
 
-// ── エラー報告 ──────────────────────────────────────────────
-
-_Noreturn void error_at(Token *tok, const char *fmt, ...) {
-    // error_at_pos は可変長引数を取るので、ここで一度整形してから渡す。
-    va_list ap;
-    va_start(ap, fmt);
-    char msg[1024];
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
-
-    error_at_pos(tok->file, tok->line_start, tok->line, tok->col, tok->len, "%s", msg);
-}
+// エラー報告（error_at / diag_fail）は diag.c に移しました。

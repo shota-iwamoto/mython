@@ -63,13 +63,28 @@
 |---|---|---|
 | `main.c` | 引数解析、パスの起動、`clang` の呼び出し | 全部 |
 | `util.c/h` | 文字列バッファ、`xmalloc`、ファイル読み込み、エラー終了 | なし（最下層） |
-| `lexer.c/h` | 字句解析 | util |
+| `lexer.c/h` | 字句解析 | util, diag |
 | `ast.c/h` | AST ノード定義とコンストラクタ、S 式ダンプ | util, lexer(Token) |
 | `types.c/h` | Type 構造体と操作 `[ch5]` | util |
 | `parser.c/h` | 構文解析 | util, lexer, ast, types |
-| `sema.c/h` | 型検査 `[ch5]` | util, ast, types |
-| `codegen.c/h` | LLVM IR 出力 | util, ast, types |
-| `diag.c/h` | 診断メッセージ整形 `[ch3]` | util |
+| `sema.c/h` | 型検査 `[ch5]` | util, ast, types, diag |
+| `codegen.c/h` | LLVM IR 出力 | util, ast, types, diag |
+| `diag.c/h` | 診断メッセージ整形 `[ch3]` | util, lexer（`Token` のため） |
+
+**⚠️ `diag` が `lexer` に依存する点について**
+診断は「ソース上の位置」を示すため `Token` を受け取ります。そのため `diag.h` は
+`lexer.h` を include します（`Token` を別ヘッダに切り出す設計も可能ですが、
+ヘッダが 1 枚増える割に得るものが少ないため採用していません）。
+
+依存の向きは `lexer → diag` ではなく **`diag → lexer`** です。
+`lexer.c` は `diag.h` を include して `error_at()` を呼びますが、
+`lexer.h` は `diag.h` を include しません。だから循環しません。
+
+**⚠️ 位置情報のないエラーは `util.c` の `error()` に残しています。**
+`xmalloc()` は確保失敗時にエラー終了する必要があるので、もし `error()` を
+`diag.c` に置くと `util → diag → util` の循環依存になります。
+「位置を示せない低レベルなエラーは util、位置つき診断は diag」と分けることで、
+`util.c` を依存グラフの最下層に保っています。
 
 **依存の向きは常に下向き（上の表で下 → 上）にします。**
 `lexer.c` が `parser.h` を include したら設計ミスです。循環依存はビルドを壊し、

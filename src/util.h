@@ -35,16 +35,19 @@ char *read_file(const char *path);
 void write_file(const char *path, const char *text);
 
 // ── エラー終了 ──────────────────────────────────────────────
-// 位置情報のないエラー（コマンドライン引数の誤りなど）
+//
+// ★ 位置情報のないエラー専用です。
+//   （コマンドライン引数の誤り、ファイルが開けない、メモリ確保失敗など）
+//
+// ソース上の位置を示せるエラーは diag.h の error_at() / diag_fail() を使います。
+//
+// 🤔 なぜ診断機能を全部 diag.c に移さないのか
+//   xmalloc() は確保に失敗したらエラー終了する必要があります。
+//   もし error() を diag.c に置くと util → diag の依存が生まれ、
+//   diag.c も xmalloc / StrBuf を使うので **循環依存**になります。
+//   「位置を示せない低レベルなエラーは util、位置つき診断は diag」と
+//   分けることで、util.c を依存グラフの最下層に保っています。
 _Noreturn void error(const char *fmt, ...);
-
-// 位置情報付きのエラー。ソース行を抜粋して下線を引きます。
-// Token を引数に取るラッパ error_at() は lexer.h にあります。
-//   line_start : その行の先頭を指すポインタ
-//   line, col  : 1 起算の行・桁
-//   len        : 下線を引く長さ
-_Noreturn void error_at_pos(const char *file, const char *line_start,
-                            int line, int col, int len, const char *fmt, ...);
 
 // コンパイラ自身のバグ（ユーザーのミスではない）を報告して終了する
 _Noreturn void internal_error(const char *file, int line, const char *fmt, ...);

@@ -127,43 +127,6 @@ _Noreturn void error(const char *fmt, ...) {
     exit(1);
 }
 
-_Noreturn void error_at_pos(const char *file, const char *line_start,
-                            int line, int col, int len, const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    fprintf(stderr, "error: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
-
-    // 位置の表示
-    //   --> file:line:col
-    fprintf(stderr, "  --> %s:%d:%d\n", file, line, col);
-
-    // 該当行を抜粋する（改行かファイル末尾まで）
-    if (line_start) {
-        int line_len = 0;
-        while (line_start[line_len] != '\n' && line_start[line_len] != '\0') line_len++;
-
-        // 行番号の桁数を揃えて、罫線を引く
-        char num[16];
-        int numw = snprintf(num, sizeof(num), "%d", line);
-        fprintf(stderr, "%*s |\n", numw, "");
-        fprintf(stderr, "%s | %.*s\n", num, line_len, line_start);
-        fprintf(stderr, "%*s | ", numw, "");
-
-        // col の位置まで空白を送る。タブはタブで送ると桁がずれにくい。
-        for (int i = 0; i < col - 1 && i < line_len; i++)
-            fputc(line_start[i] == '\t' ? '\t' : ' ', stderr);
-
-        // 下線。少なくとも 1 文字は引く
-        if (len < 1) len = 1;
-        for (int i = 0; i < len; i++) fputc('^', stderr);
-        fprintf(stderr, "\n");
-    }
-    exit(1);
-}
-
 _Noreturn void internal_error(const char *file, int line, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

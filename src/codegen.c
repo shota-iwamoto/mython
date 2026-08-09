@@ -1,5 +1,7 @@
 #include "codegen.h"
 
+#include "diag.h"
+
 #include <stdio.h>
 
 // ビルド時に Makefile が -DMYTHON_TARGET_TRIPLE=... で渡してきます。
@@ -56,9 +58,10 @@ static const char *llvm_binop(Node *n) {
             //
             // 第5章で型検査器 (sema.c) を作ったら、この検査はそちらに移します。
             // 今はまだ型検査パスが無いので、コード生成の時点で弾いています。
-            error_at(n->tok,
-                     "整数の除算に '/' は使えません。'//' を使ってください"
-                     "（'/' は float 専用です）");
+            error_at_hint(n->tok,
+                          "切り捨て除算の '//' を使ってください"
+                          "（Mython には暗黙の型変換がないため、'/' は float 専用です）",
+                          "整数の除算に '/' は使えません");
 
         default:
             UNREACHABLE();
@@ -92,8 +95,15 @@ static char *gen_expr(Emitter *e, Node *n) {
             //    実行時に SIGFPE でクラッシュします。実行時チェックには
             //    分岐とエラー報告の仕組みが必要なので、第9章で対応します。
             if ((n->op == OP_FLOORDIV || n->op == OP_MOD) &&
-                n->rhs->kind == ND_INT && n->rhs->ival == 0)
-                error_at(n->rhs->tok, "0 で除算しています");
+                n->rhs->kind == ND_INT && n->rhs->ival == 0) {
+                Diag d = {0};
+                d.message = "0 で除算しています";
+                d.primary.tok = n->rhs->tok;
+                d.primary.label = "この 0 で割ろうとしています";
+                d.related.tok = n->tok;
+                d.related.label = diag_fmt("演算子 '%s' はここです", op_symbol(n->op));
+                diag_fail(&d);
+            }
 
             // ★ 左辺 → 右辺の順に生成する（仕様 4.5：評価順は左から右）
             const char *inst = llvm_binop(n);
