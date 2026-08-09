@@ -1,0 +1,5 @@
+# EXIT: 12
+# TOKENS: INT PUNCT INT NEWLINE INT PUNCT INT NEWLINE EOF
+# 複数の式文。プログラムの値は最後の式の値（第4章の暫定仕様）
+1 + 2
+3 * 4

@@ -253,33 +253,78 @@ static Node *bitor_expr(Parser *p) {
 // 第6章で、この上に or_expr / and_expr / not_expr / comparison が積まれます。
 static Node *expr(Parser *p) { return bitor_expr(p); }
 
-// program ::= expr EOF
-static Node *program(Parser *p) {
-    Node *n = expr(p);
+// stmt ::= expr NEWLINE
+//
+// 第5章で、ここに変数宣言・代入が加わります。
+// 第7章で if / while、第8章で return が加わります。
+static Node *stmt(Parser *p) {
+    Node *e = expr(p);
 
-    // 式を読み終えたら EOF のはず。そうでなければ余計なものが残っている。
+    // 式の後は改行でなければならない
     Token *t = peek(p);
-    if (t->kind != TK_EOF) {
+    if (t->kind != TK_NEWLINE) {
         Diag d = {0};
         d.message = "式の後に余分なトークンがあります";
         d.primary.tok = t;
         d.primary.label = "ここから先が解釈できません";
-        // 第4章で複数行が書けるようになるまでは、この案内が最も役に立つ。
-        d.hint = "1 つのファイルに書けるのは 1 つの式だけです（第4章で複数行に対応します）";
+        d.hint = "1 行に書けるのは 1 つの式です（改行で区切ってください）";
+        diag_fail(&d);
+    }
+    advance(p);  // NEWLINE を消費
+    return e;
+}
+
+// program ::= { stmt } EOF
+//
+// ⚠️ 暫定仕様：トップレベルは式文の並びで、
+//    プログラムの値は「最後の式の値」になります。
+//    第8章で `def main() -> int:` が正式な入口になったら置き換えます。
+static Node *program(Parser *p) {
+    // ★ 「ダミーの先頭ノード」を使うと、リスト構築が分岐なしで書けます。
+    //   head.next が最初の要素になり、「空かどうか」の場合分けが消えます。
+    Node head = {0};
+    Node *cur = &head;
+
+    Token *first = peek(p);
+
+    while (peek(p)->kind != TK_EOF) {
+        // トップレベルにインデントされた行が来た。
+        // ブロックを作る構文（if / while / def）はまだ無いので、必ず誤り。
+        Token *t = peek(p);
+        if (t->kind == TK_INDENT) {
+            Diag d = {0};
+            d.message = "予期しないインデントです";
+            d.primary.tok = t;
+            d.primary.label = "この行が余分に字下げされています";
+            d.hint = "ブロックを作る構文（if / while / def）は第7章以降で実装します";
+            diag_fail(&d);
+        }
+        if (t->kind == TK_DEDENT) {
+            // 字句解析器の不整合。ユーザーのミスでは起こり得ない。
+            UNREACHABLE();
+        }
+
+        cur->next = stmt(p);
+        cur = cur->next;
+    }
+
+    if (!head.next) {
+        Diag d = {0};
+        d.message = "空のプログラムです";
+        d.primary.tok = first;
+        d.primary.label = "式が 1 つも見つかりません";
+        d.hint = "整数や式を 1 行以上書いてください（例: 1 + 2）";
         diag_fail(&d);
     }
 
-    return n;
+    Node *blk = new_node(ND_BLOCK, first);
+    blk->body = head.next;
+    return blk;
 }
 
 // ── 入口 ───────────────────────────────────────────────────
 
 Node *parse(TokenVec toks) {
     Parser p = {.toks = toks, .pos = 0};
-
-    // 空ファイル（TK_EOF のみ）を親切に弾く
-    if (toks.len > 0 && toks.data[0].kind == TK_EOF)
-        error_at(&toks.data[0], "空のプログラムです。整数を 1 つ書いてください");
-
     return program(&p);
 }

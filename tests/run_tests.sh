@@ -6,6 +6,10 @@
 #   # EXIT: 42        → コンパイル・実行して終了コードが 42 であること
 #   # OUTPUT: hello   → 標準出力が "hello" であること（複数行は行ごとに書く）
 #   # ERROR: メッセージ → コンパイルが失敗し、stderr にその文字列を含むこと
+#                       （複数行書くと、そのすべてを含むことを要求する）
+#   # TOKENS: INT PUNCT INT NEWLINE EOF
+#                     → --dump-tokens のトークン種別の並びが一致すること
+#                       （複数行書くと空白で連結して比較する）
 #
 # 使い方:
 #   tests/run_tests.sh                    全ケース
@@ -66,10 +70,39 @@ for case_file in "${CASES[@]}"; do
     want_error="$(sed -n 's/^# *ERROR: *//p' "$case_file")"
     # OUTPUT は複数行を許す
     want_output="$(sed -n 's/^# *OUTPUT: *//p' "$case_file")"
+    # TOKENS は複数行書けるので、空白 1 個で連結して 1 行にする
+    want_tokens="$(sed -n 's/^# *TOKENS: *//p' "$case_file" \
+                   | tr '\n' ' ' | tr -s ' ' | sed 's/ *$//')"
 
-    if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ]; then
-        report_fail "$name" "期待値のコメント（# EXIT: / # OUTPUT: / # ERROR:）がありません"
+    if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ] \
+       && [ -z "$want_tokens" ]; then
+        report_fail "$name" \
+            "期待値のコメント（# EXIT: / # OUTPUT: / # ERROR: / # TOKENS:）がありません"
         continue
+    fi
+
+    # ── TOKENS: 字句解析器の出力だけを検証する ──
+    #
+    # ★ 構文解析より前の段階を独立してテストできます。
+    #   NEWLINE / INDENT / DEDENT のような仮想トークンは、それを消費する
+    #   構文（if / def）が無くても、ここで正しさを確認できます。
+    #   第16章では、Mython 版字句解析器の検証にこの仕組みを使います。
+    if [ -n "$want_tokens" ]; then
+        actual_tokens="$("$MYTHONC" --dump-tokens "$case_file" 2>/dev/null \
+                         | awk '{print $2}' | tr '\n' ' ' | tr -s ' ' | sed 's/ *$//')"
+        if [ "$actual_tokens" != "$want_tokens" ]; then
+            report_fail "$name" "トークン列が期待と違います
+期待: $want_tokens
+実際: $actual_tokens"
+            continue
+        fi
+        # TOKENS だけのケースはここで合格
+        if [ -z "$want_exit" ] && [ -z "$want_error" ] && [ -z "$want_output" ]; then
+            printf "  %sok%s    %s %s(tokens)%s\n" "$C_OK" "$C_END" "$name" \
+                   "$C_DIM" "$C_END"
+            pass=$((pass + 1))
+            continue
+        fi
     fi
 
     # ── コンパイル ──

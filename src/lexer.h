@@ -1,7 +1,8 @@
 // lexer.h — 字句解析（① 文字列 → トークン列）
 //
-// 第2章の範囲：整数リテラル（10/16/8/2 進）・記号・EOF。
-// 識別子・キーワード・文字列・INDENT/DEDENT は第3章以降で足していきます。
+// 第4章の範囲：整数リテラル（10/16/8/2 進）・記号・
+// 仮想トークン（NEWLINE / INDENT / DEDENT）・EOF。
+// 識別子・キーワード・文字列は第5章以降で足していきます。
 #ifndef MYTHON_LEXER_H
 #define MYTHON_LEXER_H
 
@@ -13,9 +14,18 @@ typedef enum {
     TK_EOF,    // 入力の終わり
     TK_INT,    // 整数リテラル
     TK_PUNCT,  // 記号（+ - * // ( ) など）
-    // ── 第3章以降で追加していく ──
+
+    // ── 仮想トークン（ソース上に対応する文字がない）──
+    //
+    // ★ 字句解析器が「合成」します。ここが Python 風言語の核心です。
+    //   INDENT / DEDENT を波括弧言語の '{' / '}' と同じように扱えるので、
+    //   インデント構文の解析が波括弧言語とまったく同じ難しさに落ちます。
+    TK_NEWLINE,  // 論理行の終わり
+    TK_INDENT,   // ブロックの開始
+    TK_DEDENT,   // ブロックの終了
+
+    // ── 第5章以降で追加していく ──
     // TK_IDENT, TK_KEYWORD, TK_STRING, TK_FLOAT,
-    // TK_NEWLINE, TK_INDENT, TK_DEDENT,
 } TokenKind;
 
 typedef struct Token Token;

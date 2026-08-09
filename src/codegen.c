@@ -133,6 +133,18 @@ static char *gen_expr(Emitter *e, Node *n) {
             return t;
         }
 
+        case ND_BLOCK: {
+            // 文を順に評価し、最後の値を返す（第4章の暫定仕様）。
+            //
+            // ⚠️ 現時点では式に副作用がないので、最後以外の計算結果は
+            //    使われません。-O2 を掛けると消えます（3.10 節で確認）。
+            //    第5章で代入が入ると、順に実行する意味が出てきます。
+            char *last = NULL;
+            for (Node *s = n->body; s; s = s->next) last = gen_expr(e, s);
+            if (!last) UNREACHABLE();  // 空ブロックは parser が弾いている
+            return last;
+        }
+
         default:
             UNREACHABLE();
     }

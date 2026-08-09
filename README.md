@@ -25,6 +25,7 @@ def main() -> int:
 | [docs/chapters/ch01-setup-and-minimal-compiler.md](docs/chapters/ch01-setup-and-minimal-compiler.md) | **第1章：ここから手を動かす** |
 | [docs/chapters/ch02-arithmetic-and-precedence.md](docs/chapters/ch02-arithmetic-and-precedence.md) | 第2章：四則演算と演算子の優先順位 |
 | [docs/chapters/ch03-diagnostics.md](docs/chapters/ch03-diagnostics.md) | 第3章：エラー報告と診断メッセージ |
+| [docs/chapters/ch04-indentation.md](docs/chapters/ch04-indentation.md) | 第4章：インデント構文（NEWLINE / INDENT / DEDENT） |
 
 ### 設計ドキュメント
 
@@ -44,14 +45,33 @@ def main() -> int:
 
 ## 現在の到達状況
 
-**第3章 完了** — 演算子の優先順位を正しく扱う電卓 ＋ 親切な診断メッセージ。
+**第4章 完了** — 複数行のプログラムを読み、インデント構造を検出します。
 
 ```bash
 $ make
-$ echo '2 * 3 + (10 - 4) * 6' > t.my
+$ printf '2 * 3 + (10 - 4) * 6\n' > t.my
 $ ./build/mythonc t.my -o t
 $ ./t; echo $?
 42
+```
+
+インデントは仮想トークンに変換されます（`--dump-tokens` で確認できます）。
+
+```bash
+$ printf '1\n    2\n        3\n4\n' > t.my && ./build/mythonc --dump-tokens t.my
+  0  INT       1:1    1
+  1  NEWLINE   1:2
+  2  INDENT    2:5
+  3  INT       2:5    2
+  4  NEWLINE   2:6
+  5  INDENT    3:9
+  6  INT       3:9    3
+  7  NEWLINE   3:10
+  8  DEDENT    4:1
+  9  DEDENT    4:1        ← 2 段まとめて戻る
+ 10  INT       4:1    4
+ 11  NEWLINE   4:2
+ 12  EOF       4:2
 ```
 
 間違えると、こう教えてくれます。
@@ -75,14 +95,14 @@ note: 対応する '(' はここです
 
 | 段階 | 状態 |
 |---|---|
-| ① 字句解析 | 整数リテラル（10/16/8/2 進）/ 記号 15 種 / コメント / 位置情報 |
-| ② 構文解析 | 再帰下降、優先順位の階層 8 段（14 種の演算子） |
+| ① 字句解析 | 整数リテラル（10/16/8/2 進）/ 記号 15 種 / コメント / 位置情報 / **仮想トークン（NEWLINE・INDENT・DEDENT）** |
+| ② 構文解析 | 再帰下降、優先順位の階層 8 段（14 種の演算子）、複数文 |
 | ③ 型検査 | 第5章で追加 |
 | ④ コード生成 | LLVM IR テキスト出力（4 バッファ方式） |
 | ⑤ 実行ファイル | clang 連携 |
 | 診断 | 位置・ラベル・関連位置（note）・ヒント / UTF-8 対応 |
 
-テスト **36 件**（正常系 23 + エラー系 13）、ビルド警告 0、ASan/UBSan クリーン。
+テスト **46 件**、ビルド警告 0、ASan/UBSan クリーン。
 
 進捗の詳細は [docs/roadmap.md](docs/roadmap.md) の進捗表を参照してください。
 
@@ -203,7 +223,14 @@ mython/
 |---|---|
 | `# EXIT: n` | 実行して終了コードが n |
 | `# OUTPUT: text` | 標準出力が text（複数行可） |
-| `# ERROR: msg` | コンパイルが失敗し、stderr に msg を含む |
+| `# ERROR: msg` | コンパイルが失敗し、stderr に msg を含む（複数行書くと全部を要求） |
+| `# TOKENS: ...` | `--dump-tokens` のトークン種別の並びが一致（複数行は空白で連結） |
+
+```python
+# TOKENS: INT NEWLINE INDENT INT NEWLINE DEDENT EOF
+1
+    2
+```
 
 ---
 

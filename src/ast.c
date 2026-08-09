@@ -79,6 +79,12 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_BLOCK:
+            printf("(block\n");
+            for (Node *s = n->body; s; s = s->next) dump(s, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         default:
             UNREACHABLE();
     }

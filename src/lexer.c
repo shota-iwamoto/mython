@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+// インデントの最大ネスト深さ。
+// 実際のコードで 32 段以上インデントすることはまずないので、
+// 超えたらエラーにします（無限に伸ばす価値がない）。
+#define MAX_INDENT_DEPTH 64
+
 // ── 字句解析器の状態 ────────────────────────────────────────
 // ソース全体を指すポインタ p を前に進めながら読んでいきます。
 // line / line_start は、エラー報告のために常に最新に保ちます。
@@ -19,9 +24,21 @@ typedef struct {
     const char *line_start;  // 現在の行の先頭
     int line;                // 現在の行番号（1 起算）
 
-    // 直前の行（EOF トークンの位置決めに使う。下の tokenize() 末尾を参照）
+    // 直前の行（EOF トークンの位置決めに使う。第3章 3.6 節を参照）
     const char *prev_line_start;
     int prev_line;
+
+    // ── インデントの状態 ──
+    //
+    // インデント幅のスタック。常に先頭は 0（トップレベル）。
+    //   例: 0 → 4 → 8 とネストしている状態なら {0, 4, 8}
+    int indent_stack[MAX_INDENT_DEPTH];
+    int indent_len;  // スタックに積まれている段数（最低 1）
+
+    // 括弧の深さ。0 より大きいときは改行を無視する（論理行が続く）。
+    //   x = (1 +
+    //        2)      ← この改行では NEWLINE を出さない
+    int paren_depth;
 
     TokenVec out;  // 出力先
 } Lexer;
@@ -148,6 +165,113 @@ static void read_int(Lexer *lx) {
     t->ival = v;
 }
 
+// ── 改行の処理 ──────────────────────────────────────────────
+
+// '\n' を 1 つ読み進め、行番号と行頭ポインタを更新する。
+// 3 か所から呼ばれるので関数にしています。
+static void advance_newline(Lexer *lx) {
+    // 今終えた行を「直前の行」として覚えておく（EOF の位置決め用）
+    lx->prev_line_start = lx->line_start;
+    lx->prev_line = lx->line;
+
+    lx->p++;  // '\n' を消費
+    lx->line++;
+    lx->line_start = lx->p;
+}
+
+// ── インデントの処理（この章の核心）──────────────────────────
+
+// 行頭にいる状態で呼ぶ。
+//
+// 空行・コメントだけの行を読み飛ばし、実質的な内容がある行の
+// インデント幅（先頭の空白の個数）を返す。入力が終わったら -1 を返す。
+//
+// ★ 空行とコメント行を「インデント計算の対象外」にするのが重要です。
+//   Python と同じ規則（言語仕様 2.4）。これをしないと、
+//   ブロックの途中に空行を入れただけでエラーになってしまいます。
+static int scan_indent(Lexer *lx) {
+    for (;;) {
+        int width = 0;
+        while (*lx->p == ' ') {
+            width++;
+            lx->p++;
+        }
+
+        // タブは字句エラー（言語仕様 2.4）
+        if (*lx->p == '\t') {
+            Token tmp = span_token(lx, lx->p, lx->p + 1);
+            error_at_hint(&tmp,
+                          "タブ幅の解釈によってインデントの意味が変わるのを防ぐため、"
+                          "Mython ではタブを禁止しています（半角スペース 4 個を推奨）",
+                          "タブ文字は使えません");
+        }
+
+        if (*lx->p == '\n') {  // 空行 → インデントに影響させない
+            advance_newline(lx);
+            continue;
+        }
+        if (*lx->p == '#') {  // コメントだけの行 → 同じく影響させない
+            while (*lx->p && *lx->p != '\n') lx->p++;
+            if (*lx->p == '\n') {
+                advance_newline(lx);
+                continue;
+            }
+            return -1;  // ファイル末尾（改行なしでコメントが終わった）
+        }
+        if (*lx->p == '\0') return -1;  // 入力終了
+
+        return width;  // 内容のある行が見つかった
+    }
+}
+
+// 行のインデント幅とスタックを比較し、必要な INDENT / DEDENT を出す。
+static void emit_indent_tokens(Lexer *lx, int width) {
+    int top = lx->indent_stack[lx->indent_len - 1];
+
+    if (width > top) {
+        // 深くなった → INDENT を 1 個だけ出す
+        //
+        // ⚠️ 「4 段深くなったから INDENT 4 個」ではありません。
+        //    インデント 1 段 = INDENT 1 個です。幅は任意（言語仕様 2.4）。
+        if (lx->indent_len >= MAX_INDENT_DEPTH) {
+            Token tmp = span_token(lx, lx->p, lx->p + 1);
+            error_at(&tmp, "インデントが深すぎます（最大 %d 段）", MAX_INDENT_DEPTH - 1);
+        }
+        lx->indent_stack[lx->indent_len++] = width;
+        tv_push(lx, TK_INDENT, lx->p, 0);
+        return;
+    }
+
+    if (width < top) {
+        // 浅くなった → 戻った段数ぶん DEDENT を出す
+        //
+        // ★ DEDENT は一度に複数個出ることがあります。
+        //   深いネストから一気にトップレベルへ戻る場合です:
+        //
+        //       if a:          indent 0
+        //           if b:      indent 4  → INDENT
+        //               x      indent 8  → INDENT
+        //       y              indent 0  → DEDENT, DEDENT （2 個！）
+        while (lx->indent_len > 1 && lx->indent_stack[lx->indent_len - 1] > width) {
+            lx->indent_len--;
+            tv_push(lx, TK_DEDENT, lx->p, 0);
+        }
+
+        // 戻った先がスタックに無い＝どのブロックにも揃っていない
+        //
+        //       if a:
+        //               x       indent 8
+        //           y           indent 4 ← 8 でも 0 でもない。不正
+        if (lx->indent_stack[lx->indent_len - 1] != width) {
+            Token tmp = span_token(lx, lx->line_start, lx->p);
+            error_at_hint(&tmp,
+                          "外側のブロックのインデント幅と正確に一致させてください",
+                          "インデントが揃っていません（どのブロックにも対応しません）");
+        }
+    }
+    // width == top なら何も出さない（同じブロックの続き）
+}
+
 // ── 記号の読み取り ──────────────────────────────────────────
 
 // ★ 長い記号を先に並べること。
@@ -161,12 +285,30 @@ static const char *PUNCTS[] = {
     NULL,
 };
 
+// 開き括弧・閉じ括弧の対応表。
+// 第10章で "[" "]"、第12章で "{" "}" を足すときはここに 1 文字ずつ加えるだけです。
+static const char *OPEN_BRACKETS = "(";
+static const char *CLOSE_BRACKETS = ")";
+
 // 記号を 1 つ読む。読めたら 1、読めなければ 0 を返す。
 static int read_punct(Lexer *lx) {
     for (int i = 0; PUNCTS[i]; i++) {
         size_t len = strlen(PUNCTS[i]);
         if (strncmp(lx->p, PUNCTS[i], len) == 0) {
             tv_push(lx, TK_PUNCT, lx->p, (int)len);
+
+            // 括弧の深さを追跡する（括弧の中では改行を無視するため）
+            if (len == 1) {
+                if (strchr(OPEN_BRACKETS, *lx->p)) {
+                    lx->paren_depth++;
+                } else if (strchr(CLOSE_BRACKETS, *lx->p)) {
+                    // ⚠️ 負にしない。対応しない ')' は構文解析器が報告します。
+                    //    ここで負にすると、以降ずっと改行が無視されて
+                    //    まったく別の場所で不可解なエラーになります。
+                    if (lx->paren_depth > 0) lx->paren_depth--;
+                }
+            }
+
             lx->p += len;
             return 1;
         }
@@ -185,21 +327,41 @@ TokenVec tokenize(const char *file, const char *src) {
     lx.line = 1;
     tv_init(&lx.out);
 
-    while (*lx.p) {
-        // 改行：行番号を進める
-        // 第4章ではここで NEWLINE トークンと INDENT/DEDENT を生成します。
-        if (*lx.p == '\n') {
-            // 今終えた行を「直前の行」として覚えておく（EOF の位置決め用）
-            lx.prev_line_start = lx.line_start;
-            lx.prev_line = lx.line;
+    // スタックの底は常に 0（トップレベルのインデント幅）
+    lx.indent_stack[0] = 0;
+    lx.indent_len = 1;
 
-            lx.p++;
-            lx.line++;
-            lx.line_start = lx.p;
+    // 次に読むのが「論理行の先頭」かどうか。最初は当然そう。
+    bool at_line_start = true;
+
+    while (*lx.p) {
+        // ── ① 行頭処理：インデントを測って INDENT / DEDENT を出す ──
+        //
+        // 括弧の中（paren_depth > 0）では論理行が続いているので、
+        // 行頭であってもインデントは計算しません。
+        if (at_line_start && lx.paren_depth == 0) {
+            int width = scan_indent(&lx);
+            if (width < 0) break;  // 空行・コメントだけで入力が終わった
+            emit_indent_tokens(&lx, width);
+            at_line_start = false;
+            continue;
+        }
+        at_line_start = false;
+
+        // ── ② 改行：NEWLINE を出して行頭に戻る ──
+        if (*lx.p == '\n') {
+            // ★ 括弧の中では改行を無視する（論理行が続く）
+            //     x = (1 +
+            //          2)     ← ここで NEWLINE を出してはいけない
+            if (lx.paren_depth == 0) {
+                tv_push(&lx, TK_NEWLINE, lx.p, 0);
+                at_line_start = true;
+            }
+            advance_newline(&lx);
             continue;
         }
 
-        // 空白（スペース）
+        // 空白（スペース）。行頭の空白は ① で処理済みなので、ここは行中の空白。
         if (*lx.p == ' ') {
             lx.p++;
             continue;
@@ -258,15 +420,29 @@ TokenVec tokenize(const char *file, const char *src) {
     //        |
     //      2 | (1 + 2
     //        |       ^ ここに ')' が必要です   ← 読める！
+    const char *end_loc = lx.p;
     if (lx.p == lx.line_start && lx.prev_line_start) {
         lx.line_start = lx.prev_line_start;
         lx.line = lx.prev_line;
         const char *eol = lx.prev_line_start;
         while (*eol && *eol != '\n') eol++;
-        tv_push(&lx, TK_EOF, eol, 0);
-    } else {
-        tv_push(&lx, TK_EOF, lx.p, 0);
+        end_loc = eol;
     }
+
+    // ★ ファイル末尾では、開いているインデントぶんの DEDENT を全部出す。
+    //
+    //   これを忘れると、ブロックの中でファイルが終わったときに
+    //   構文解析器が「ブロックが閉じられていない」ことに気づけません。
+    //
+    //       if a:
+    //           x        ← ファイルがここで終わる
+    //                       DEDENT を出さないと block 規則が終われない
+    while (lx.indent_len > 1) {
+        lx.indent_len--;
+        tv_push(&lx, TK_DEDENT, end_loc, 0);
+    }
+
+    tv_push(&lx, TK_EOF, end_loc, 0);
     return lx.out;
 }
 
@@ -277,6 +453,9 @@ const char *token_kind_name(TokenKind kind) {
         case TK_EOF: return "EOF";
         case TK_INT: return "INT";
         case TK_PUNCT: return "PUNCT";
+        case TK_NEWLINE: return "NEWLINE";
+        case TK_INDENT: return "INDENT";
+        case TK_DEDENT: return "DEDENT";
         default: UNREACHABLE();
     }
 }
@@ -295,7 +474,11 @@ void dump_tokens(TokenVec toks) {
             case TK_INT:
                 printf("%lld", t->ival);
                 break;
+            // 仮想トークンと EOF は長さ 0 なので表示する実体がない
             case TK_EOF:
+            case TK_NEWLINE:
+            case TK_INDENT:
+            case TK_DEDENT:
                 break;
             default:
                 printf("%.*s", t->len, t->loc);

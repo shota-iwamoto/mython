@@ -1,0 +1,5 @@
+# EXIT: 6
+# TOKENS: PUNCT INT PUNCT INT PUNCT NEWLINE EOF
+# ★ 括弧の中では行頭の空白をインデントとして扱わない
+(1 +
+        5)

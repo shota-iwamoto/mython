@@ -336,7 +336,7 @@ Token | None
 | ch1 | `program ::= expr EOF`、`expr ::= INT`（※暫定形。仕様と異なる過渡的な文法） |
 | ch2 | `bitor_expr` `bitxor_expr` `bitand_expr` `shift_expr` `add_expr` `mul_expr` `unary` `primary`（`(` `)` 含む）、16/8/2進リテラル |
 | ch3 | 変更なし（エラー報告の改善） |
-| ch4 | `NEWLINE` `INDENT` `DEDENT` の生成、`block` |
+| ch4 | `NEWLINE` / `INDENT` / `DEDENT` の**生成**、複数文（`program ::= { stmt } EOF`、`stmt ::= expr NEWLINE`）。`block` 規則自体は、それを使う構文（if / while）が入る第7章から |
 | ch5 | `var_decl` `assign_stmt` `augop` `type`（プリミティブのみ） |
 | ch6 | `or_expr` `and_expr` `not_expr` `comparison` |
 | ch7 | `if_stmt` `while_stmt` `break` `continue` `pass` |
