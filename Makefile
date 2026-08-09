@@ -1,0 +1,77 @@
+# Mython コンパイラ (stage0) のビルド
+#
+# 使い方:
+#   make            コンパイラをビルド
+#   make test       テストを全部実行
+#   make asan       AddressSanitizer 付きでビルド（メモリバグ調査用）
+#   make clean      生成物を削除
+
+CC      := clang
+CFLAGS  := -std=c11 -g -O0 -Wall -Wextra -Wno-unused-parameter
+
+# ── ターゲット triple の自動取得 ──────────────────────────────
+# 生成する LLVM IR に書き込む triple。
+#
+# ⚠️ `clang -print-target-triple` を使ってはいけません。
+#    macOS ではそれが返す値（x86_64-apple-darwin25.5.0）と、clang が実際に
+#    IR に書く値（x86_64-apple-macosx26.0.0）が異なり、警告の原因になります。
+#    「clang 自身に空の C ファイルの IR を吐かせて、そこから抜き出す」のが確実です。
+HOST_TRIPLE := $(shell $(CC) -S -emit-llvm -x c /dev/null -o - 2>/dev/null \
+                 | sed -n 's/^target triple = "\(.*\)"$$/\1/p')
+CFLAGS  += -DMYTHON_TARGET_TRIPLE='"$(HOST_TRIPLE)"'
+
+# ── Homebrew LLVM のツール（opt / lli / llvm-as）─────────────
+# clang は Apple 版を使いますが、opt などは Homebrew 版が必要です。
+# Linux など brew がない環境では PATH から探します。
+LLVM_BIN := $(shell brew --prefix llvm 2>/dev/null)/bin
+ifeq ($(wildcard $(LLVM_BIN)/opt),)
+  LLVM_BIN := $(patsubst %/,%,$(dir $(shell which opt 2>/dev/null)))
+endif
+OPT      := $(LLVM_BIN)/opt
+LLI      := $(LLVM_BIN)/lli
+LLVM_AS  := $(LLVM_BIN)/llvm-as
+
+SRCS    := $(wildcard src/*.c)
+OBJS    := $(SRCS:src/%.c=build/%.o)
+DEPS    := $(OBJS:.o=.d)
+TARGET  := build/mythonc
+
+.PHONY: all clean test test-one asan info
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
+
+# -MMD -MP でヘッダの依存関係を自動生成する。
+# これがないと、ヘッダを直したのに再ビルドされず不思議なバグに悩まされます。
+build/%.o: src/%.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(DEPS)
+
+# ── テスト ──────────────────────────────────────────────────
+test: $(TARGET)
+	@tests/run_tests.sh
+
+# 1 ケースだけ実行: make test-one CASE=tests/cases/int_42.my
+test-one: $(TARGET)
+	@tests/run_tests.sh $(CASE)
+
+# ── AddressSanitizer ビルド ─────────────────────────────────
+# セグフォの原因が分からないときに使います。
+#   make asan && ./build/mythonc-asan tests/cases/int_42.my
+asan:
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fsanitize=address,undefined $(SRCS) -o build/mythonc-asan
+
+# ── 情報表示 ────────────────────────────────────────────────
+info:
+	@echo "CC           = $(CC)"
+	@echo "HOST_TRIPLE  = $(HOST_TRIPLE)"
+	@echo "LLVM_BIN     = $(LLVM_BIN)"
+	@echo "SRCS         = $(SRCS)"
+
+clean:
+	rm -rf build a.out a.out.ll tests/tmp

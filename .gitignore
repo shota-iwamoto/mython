@@ -1,0 +1,7 @@
+build/
+tests/tmp/
+a.out
+*.ll
+*.o
+*.d
+*.dSYM/
