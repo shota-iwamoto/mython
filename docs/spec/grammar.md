@@ -334,14 +334,14 @@ Token | None
 | 章 | 実装する規則 |
 |---|---|
 | ch1 | `program ::= expr EOF`、`expr ::= INT`（※暫定形。仕様と異なる過渡的な文法） |
-| ch2 | `add_expr` `mul_expr` `unary` `power` `primary`（`(` `)` 含む） |
+| ch2 | `bitor_expr` `bitxor_expr` `bitand_expr` `shift_expr` `add_expr` `mul_expr` `unary` `primary`（`(` `)` 含む）、16/8/2進リテラル |
 | ch3 | 変更なし（エラー報告の改善） |
 | ch4 | `NEWLINE` `INDENT` `DEDENT` の生成、`block` |
 | ch5 | `var_decl` `assign_stmt` `augop` `type`（プリミティブのみ） |
 | ch6 | `or_expr` `and_expr` `not_expr` `comparison` |
 | ch7 | `if_stmt` `while_stmt` `break` `continue` `pass` |
 | ch8 | `func_def` `param_list` `return_stmt` `call_suffix` |
-| ch9 | `STRING` `FLOAT`、`extern_def` |
+| ch9 | `STRING` `FLOAT`、`extern_def`、`power`（`**` は負の指数を実行時エラーにするためランタイムが必要） |
 | ch10 | `list_display` `index_suffix`、`type` のジェネリック部分 |
 | ch11 | `for_stmt` |
 | ch12 | `class_def` `field_decl` `attr_suffix`、Nullable 型 |

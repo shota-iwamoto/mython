@@ -23,6 +23,7 @@ def main() -> int:
 | [docs/00-introduction.md](docs/00-introduction.md) | コンパイラとは何か / 全体像 / 設計方針 |
 | [docs/roadmap.md](docs/roadmap.md) | 全 20 章のロードマップ |
 | [docs/chapters/ch01-setup-and-minimal-compiler.md](docs/chapters/ch01-setup-and-minimal-compiler.md) | **第1章：ここから手を動かす** |
+| [docs/chapters/ch02-arithmetic-and-precedence.md](docs/chapters/ch02-arithmetic-and-precedence.md) | 第2章：四則演算と演算子の優先順位 |
 
 ### 設計ドキュメント
 
@@ -42,11 +43,11 @@ def main() -> int:
 
 ## 現在の到達状況
 
-**第1章 完了** — 整数リテラルをコンパイルして実行ファイルを生成できます。
+**第2章 完了** — 演算子の優先順位を正しく扱う電卓として動きます。
 
 ```bash
 $ make
-$ echo 42 > t.my
+$ echo '2 * 3 + (10 - 4) * 6' > t.my
 $ ./build/mythonc t.my -o t
 $ ./t; echo $?
 42
@@ -54,11 +55,13 @@ $ ./t; echo $?
 
 | 段階 | 状態 |
 |---|---|
-| ① 字句解析 | 整数リテラル / コメント / 空白 / タブ禁止 / 位置情報 |
-| ② 構文解析 | 再帰下降の骨格（`program ::= expr EOF`） |
+| ① 字句解析 | 整数リテラル（10/16/8/2 進）/ 記号 15 種 / コメント / 位置情報 |
+| ② 構文解析 | 再帰下降、優先順位の階層 8 段（14 種の演算子） |
 | ③ 型検査 | 第5章で追加 |
 | ④ コード生成 | LLVM IR テキスト出力（4 バッファ方式） |
 | ⑤ 実行ファイル | clang 連携 |
+
+テスト **34 件**（正常系 23 + エラー系 11）、ビルド警告 0、ASan/UBSan クリーン。
 
 進捗の詳細は [docs/roadmap.md](docs/roadmap.md) の進捗表を参照してください。
 

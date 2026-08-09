@@ -33,6 +33,38 @@ static char *new_tmp(Emitter *e) {
     return buf;
 }
 
+// 二項演算子に対応する LLVM 命令の名前を返す。
+//
+// ⚠️ int は符号付きなので、必ず 's' の付く命令を使います。
+//    sdiv / srem / ashr（udiv / urem / lshr ではない）。
+//    間違えると負数で誤った結果になります。
+static const char *llvm_binop(Node *n) {
+    switch (n->op) {
+        case OP_ADD: return "add";
+        case OP_SUB: return "sub";
+        case OP_MUL: return "mul";
+        case OP_FLOORDIV: return "sdiv";  // 符号付き除算
+        case OP_MOD: return "srem";       // 符号付き剰余
+        case OP_BITAND: return "and";
+        case OP_BITOR: return "or";
+        case OP_BITXOR: return "xor";
+        case OP_SHL: return "shl";
+        case OP_SHR: return "ashr";  // 算術シフト（符号を保つ）
+
+        case OP_TRUEDIV:
+            // 言語仕様 4.2：'/' は float 専用。int には '//' を使わせる。
+            //
+            // 第5章で型検査器 (sema.c) を作ったら、この検査はそちらに移します。
+            // 今はまだ型検査パスが無いので、コード生成の時点で弾いています。
+            error_at(n->tok,
+                     "整数の除算に '/' は使えません。'//' を使ってください"
+                     "（'/' は float 専用です）");
+
+        default:
+            UNREACHABLE();
+    }
+}
+
 // ── 式の生成 ────────────────────────────────────────────────
 //
 // gen_expr の約束：
@@ -40,6 +72,8 @@ static char *new_tmp(Emitter *e) {
 //     結果の値が入っている場所の名前（レジスタ名 or 即値）を返す」
 //
 // この 1 つの約束が、コード生成器の設計全体を決めます。
+// 即値（"42"）とレジスタ（"%t0"）を同じ char * で扱えるので、
+// 呼び出し側で場合分けが不要になります。
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
         case ND_INT: {
@@ -50,6 +84,45 @@ static char *gen_expr(Emitter *e, Node *n) {
             snprintf(buf, 24, "%lld", n->ival);
             return buf;
         }
+
+        case ND_BINOP: {
+            // 0 除算のうち、右辺がリテラル 0 の場合はコンパイル時に弾く。
+            //
+            // ⚠️ 既知の制限：右辺が式（例 1 // (2 - 2)）の場合は検出できず、
+            //    実行時に SIGFPE でクラッシュします。実行時チェックには
+            //    分岐とエラー報告の仕組みが必要なので、第9章で対応します。
+            if ((n->op == OP_FLOORDIV || n->op == OP_MOD) &&
+                n->rhs->kind == ND_INT && n->rhs->ival == 0)
+                error_at(n->rhs->tok, "0 で除算しています");
+
+            // ★ 左辺 → 右辺の順に生成する（仕様 4.5：評価順は左から右）
+            const char *inst = llvm_binop(n);
+            char *l = gen_expr(e, n->lhs);
+            char *r = gen_expr(e, n->rhs);
+            char *t = new_tmp(e);
+            sb_printf(&e->body, "  %s = %s i64 %s, %s\n", t, inst, l, r);
+            return t;
+        }
+
+        case ND_UNARY: {
+            char *v = gen_expr(e, n->lhs);
+
+            // +x は何もしない（値をそのまま返す）
+            if (n->op == OP_POS) return v;
+
+            char *t = new_tmp(e);
+            if (n->op == OP_NEG) {
+                // ⚠️ LLVM に整数の neg 命令はありません。0 からの減算で表現します。
+                sb_printf(&e->body, "  %s = sub i64 0, %s\n", t, v);
+            } else if (n->op == OP_BITNOT) {
+                // ~x は全ビット反転 = x XOR -1（-1 は全ビット 1）
+                sb_printf(&e->body, "  %s = xor i64 %s, -1\n", t, v);
+            } else {
+                UNREACHABLE();
+            }
+            return t;
+        }
+
         default:
             UNREACHABLE();
     }

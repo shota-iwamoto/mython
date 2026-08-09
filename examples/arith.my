@@ -1,0 +1,9 @@
+# 第2章で動くようになった式。
+# 演算子の優先順位と括弧が正しく処理されます。
+#
+#   ../build/mythonc arith.my -o arith && ./arith; echo $?
+#   → 42
+#
+# AST を見てみると木の形が確認できます:
+#   ../build/mythonc --dump-ast arith.my
+2 * 3 + (10 - 4) * 6

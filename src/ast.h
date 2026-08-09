@@ -12,11 +12,37 @@
 #include "lexer.h"
 
 typedef enum {
-    ND_INT,  // 整数リテラル → ival
-    // ── 第2章以降で追加していく ──
-    // ND_BINOP, ND_UNARY, ND_VAR, ND_CALL, ...
-    // ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
+    ND_INT,    // 整数リテラル → ival
+    ND_BINOP,  // 二項演算   → op, lhs, rhs
+    ND_UNARY,  // 単項演算   → op, lhs
+    // ── 第3章以降で追加していく ──
+    // ND_VAR, ND_CALL, ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
 } NodeKind;
+
+// 演算子の種類。
+// トークンの文字列（"+"）ではなくこの enum で持つことで、
+// コード生成の switch がコンパイラにチェックされるようになります。
+typedef enum {
+    // 二項
+    OP_ADD,       // +
+    OP_SUB,       // -
+    OP_MUL,       // *
+    OP_TRUEDIV,   // /   ← int には使えない（// を使う）。仕様 4.2
+    OP_FLOORDIV,  // //
+    OP_MOD,       // %
+    OP_BITAND,    // &
+    OP_BITOR,     // |
+    OP_BITXOR,    // ^
+    OP_SHL,       // <<
+    OP_SHR,       // >>
+    // 単項
+    OP_NEG,     // -x
+    OP_POS,     // +x
+    OP_BITNOT,  // ~x
+} OpKind;
+
+// 演算子の記号（エラーメッセージと --dump-ast 用）
+const char *op_symbol(OpKind op);
 
 typedef struct Node Node;
 struct Node {
@@ -33,15 +59,21 @@ struct Node {
 
     // ── 値 ──
     long long ival;  // ND_INT
+    OpKind op;       // ND_BINOP / ND_UNARY
 
-    // ── 子ノード（第2章以降）──
-    // Node *lhs, *rhs;
+    // ── 子ノード ──
+    // 単項演算は lhs だけを使います（rhs は NULL）。
+    Node *lhs, *rhs;
+
+    // ── 兄弟ノード（第4章：文のリストを繋ぐ）──
     // Node *next;
 };
 
 // コンストラクタ
 Node *new_node(NodeKind kind, Token *tok);
 Node *new_int_node(Token *tok, long long value);
+Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
+Node *new_unary_node(Token *tok, OpKind op, Node *operand);
 
 // AST を S 式で標準出力に表示する（--dump-ast 用）。
 // テキストとして比較できる形にしておくのが重要です。

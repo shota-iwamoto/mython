@@ -1,17 +1,20 @@
 // lexer.h — 字句解析（① 文字列 → トークン列）
 //
-// 第1章の範囲：整数リテラルと EOF のみ。
-// 記号・識別子・キーワード・INDENT/DEDENT は第2章以降で足していきます。
+// 第2章の範囲：整数リテラル（10/16/8/2 進）・記号・EOF。
+// 識別子・キーワード・文字列・INDENT/DEDENT は第3章以降で足していきます。
 #ifndef MYTHON_LEXER_H
 #define MYTHON_LEXER_H
+
+#include <stdbool.h>
 
 #include "util.h"
 
 typedef enum {
-    TK_EOF,   // 入力の終わり
-    TK_INT,   // 整数リテラル
-    // ── 第2章以降で追加していく ──
-    // TK_PUNCT, TK_IDENT, TK_KEYWORD, TK_STRING, TK_FLOAT,
+    TK_EOF,    // 入力の終わり
+    TK_INT,    // 整数リテラル
+    TK_PUNCT,  // 記号（+ - * // ( ) など）
+    // ── 第3章以降で追加していく ──
+    // TK_IDENT, TK_KEYWORD, TK_STRING, TK_FLOAT,
     // TK_NEWLINE, TK_INDENT, TK_DEDENT,
 } TokenKind;
 
@@ -48,6 +51,11 @@ TokenVec tokenize(const char *file, const char *src);
 
 // TokenKind の名前（--dump-tokens 用）
 const char *token_kind_name(TokenKind kind);
+
+// トークンが指定した記号そのものか判定する。
+//   tok_is(t, "+")  →  t が記号 '+' なら true
+// 記号の文字列を Token に複製せず、ソース上の位置と長さで比較します。
+bool tok_is(Token *tok, const char *op);
 
 // --dump-tokens の出力
 void dump_tokens(TokenVec toks);
