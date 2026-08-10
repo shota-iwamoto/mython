@@ -6,6 +6,7 @@
 
 Type *ty_int;
 Type *ty_bool;
+Type *ty_none;
 
 static Type *new_type(TypeKind kind) {
     Type *t = xmalloc(sizeof(Type));
@@ -16,6 +17,7 @@ static Type *new_type(TypeKind kind) {
 void types_init(void) {
     ty_int = new_type(TY_INT);
     ty_bool = new_type(TY_BOOL);
+    ty_none = new_type(TY_NONE);
 }
 
 bool type_equal(Type *a, Type *b) {
@@ -32,6 +34,7 @@ const char *type_name(Type *t) {
     switch (t->kind) {
         case TY_INT: return "int";
         case TY_BOOL: return "bool";
+        case TY_NONE: return "None";
         default: UNREACHABLE();
     }
 }
@@ -39,7 +42,8 @@ const char *type_name(Type *t) {
 Type *type_from_name(const char *name) {
     if (strcmp(name, "int") == 0) return ty_int;
     if (strcmp(name, "bool") == 0) return ty_bool;
+    if (strcmp(name, "None") == 0) return ty_none;
     return NULL;  // 未知の型名
 }
 
-const char *type_name_list(void) { return "int, bool"; }
+const char *type_name_list(void) { return "int, bool, None"; }

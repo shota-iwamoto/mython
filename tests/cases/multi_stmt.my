@@ -1,5 +1,6 @@
 # EXIT: 12
-# TOKENS: INT PUNCT INT NEWLINE INT PUNCT INT NEWLINE EOF
-# 複数の式文。プログラムの値は最後の式の値（第4章の暫定仕様）
-1 + 2
-3 * 4
+# 複数の文。プログラムの値は main の return で決まる
+def main() -> int:
+    x: int = 1 + 2
+    x = 3 * 4
+    return x

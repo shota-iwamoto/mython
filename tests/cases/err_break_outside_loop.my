@@ -1,4 +1,5 @@
 # ERROR: 'break' はループの外では使えません
 # ERROR: この 'break' を囲む while がありません
-break
-0
+def main() -> int:
+    break
+    return 0

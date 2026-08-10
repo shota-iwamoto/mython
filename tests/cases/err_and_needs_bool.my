@@ -1,4 +1,5 @@
 # ERROR: 演算子 'and' には bool が必要です
 # ERROR: これは 'int' 型です
 # ERROR: = ヒント: Mython は int を真偽値として扱いません
-1 and 2
+def main() -> int:
+    return 1 and 2

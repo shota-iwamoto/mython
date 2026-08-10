@@ -1,4 +1,5 @@
 # ERROR: 型が一致しません
 # ERROR: 型 'bool' の式
 # ERROR: 変数 'x' は 'int' 型として宣言されています
-x: int = True
+def main() -> int:
+    x: int = True

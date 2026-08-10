@@ -1,5 +1,6 @@
 # EXIT: 0
 # 条件は「入る前に」評価される（do-while ではない）
-while False:
-    print(1)
-0
+def main() -> int:
+    while False:
+        print(1)
+    return 0

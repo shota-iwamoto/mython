@@ -1,5 +1,8 @@
 # EXIT: 1
 # 第6章の達成目標
-x: int = 5
-flag: bool = x < 10 and not (x == 3)
-flag
+def main() -> int:
+    x: int = 5
+    flag: bool = x < 10 and not (x == 3)
+    if flag:
+        return 1
+    return 0

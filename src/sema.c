@@ -18,7 +18,10 @@
 typedef struct VarEntry VarEntry;
 struct VarEntry {
     char *name;      // Mython 上の名前（エラーメッセージ用）
-    char *ir_name;   // LLVM 上の名前（%x, %x.1, ...）。第7章で追加
+    char *ir_name;   // LLVM 上の名前。★ 記号（% / @）まで含めた完全な形
+                     //   ローカル : %x, %x.1
+                     //   グローバル: @g.x（第8章）
+    bool is_global;  // 第8章
     Type *type;
     Token *decl_tok;  // 宣言された位置（再宣言エラーで「前の宣言はここ」を示す）
     VarEntry *next;
@@ -39,11 +42,34 @@ struct UsedName {
     UsedName *next;
 };
 
+// 関数のシグネチャ表（第8章）。
+//
+// ★ 本体を見る前に、全部の関数をここに登録します（8.5 節）。
+//   前方参照と再帰が自然に通るようになります。
+typedef struct FuncSig FuncSig;
+struct FuncSig {
+    char *name;
+    Type *ret;
+    Type **params;  // 引数の型
+    char **pnames;  // 引数名（エラーメッセージ用）
+    int nparams;
+    Token *tok;     // 定義位置（「この関数はここで定義されています」用）
+    FuncSig *next;
+};
+
 typedef struct {
     Scope *scope;      // 現在のスコープ
     int loop_depth;    // 今いるループの深さ（break / continue の検査用）
-    UsedName *used;    // 割り当て済みの IR 名
+    UsedName *used;    // 割り当て済みの IR 名（関数ごとにリセット）
+    FuncSig *funcs;    // 関数表（第8章）
+    FuncSig *cur_func; // 今どの関数を検査中か（return の検査に必要）
 } Sema;
+
+static FuncSig *lookup_func(Sema *s, const char *name) {
+    for (FuncSig *f = s->funcs; f; f = f->next)
+        if (strcmp(f->name, name) == 0) return f;
+    return NULL;
+}
 
 static Scope *scope_push(Sema *s) {
     Scope *sc = xmalloc(sizeof(Scope));
@@ -117,10 +143,15 @@ static char *unique_ir_name(Sema *s, char *name) {
     }
 }
 
+// ローカル変数として登録する（IR 名は %x 形式）
 static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "%%%s", unique_ir_name(s, name));
+
     VarEntry *v = xmalloc(sizeof(VarEntry));
     v->name = name;
-    v->ir_name = unique_ir_name(s, name);
+    v->ir_name = sb_str(&sb);
     v->type = type;
     v->decl_tok = tok;
     v->next = s->scope->vars;
@@ -135,6 +166,8 @@ static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
 //
 // gen_expr（コード生成）と対になる構造です。
 static Type *check_expr(Sema *s, Node *n);
+
+static Type *check_call(Sema *s, Node *n);
 
 // 二項演算子が、その型に適用できるか
 static bool op_supports(OpKind op, Type *t) {
@@ -277,6 +310,7 @@ static Type *check_expr(Sema *s, Node *n) {
         case ND_VAR: t = check_var(s, n); break;
         case ND_BINOP: t = check_binop(s, n); break;
         case ND_LOGICAL: t = check_logical(s, n); break;
+        case ND_CALL: t = check_call(s, n); break;
         case ND_UNARY: t = check_unary(s, n); break;
         default: UNREACHABLE();
     }
@@ -400,18 +434,124 @@ static void check_block(Sema *s, Node *n) {
     scope_pop(s);
 }
 
-static void check_print(Sema *s, Node *n) {
-    Type *t = check_expr(s, n->lhs);
+// 組み込み関数 print の検査（第8章で「文」から「関数」になった）。
+//
+// ⚠️ まだ int 専用です。言語仕様 7 節では str / bool / float の
+//    オーバーロードがありますが、str も bool の文字列化も第9章です。
+static Type *check_print_call(Sema *s, Node *n) {
+    int nargs = 0;
+    for (Node *a = n->args; a; a = a->next) nargs++;
+    if (nargs != 1) {
+        Diag d = {0};
+        d.message = diag_fmt("print は 1 個の引数を取りますが、%d 個渡されました", nargs);
+        d.primary.tok = n->tok;
+        d.primary.label = "引数の個数が違います";
+        d.hint = "print(値) の形で使ってください";
+        diag_fail(&d);
+    }
 
-    // ⚠️ 暫定実装なので int だけ。言語仕様では str / bool / float の
-    //    オーバーロードがありますが、str は第9章、bool の文字列化も第9章です。
+    Type *t = check_expr(s, n->args);
     if (t->kind != TY_INT) {
         Diag d = {0};
         d.message = diag_fmt("print はまだ '%s' 型を出力できません", type_name(t));
-        d.primary.tok = n->lhs->tok;
+        d.primary.tok = n->args->tok;
         d.primary.label = diag_fmt("これは '%s' 型です", type_name(t));
-        d.hint = "第7章の print は int 専用の暫定実装です"
+        d.hint = "print は今のところ int 専用です"
                  "（bool / str の出力は第9章で対応します）";
+        diag_fail(&d);
+    }
+    return ty_none;  // ★ 値を返さない
+}
+
+// 関数呼び出しの検査（docs/spec/type-system.md 5.7 の順序に従う）
+static Type *check_call(Sema *s, Node *n) {
+    if (strcmp(n->name, "print") == 0) return check_print_call(s, n);
+
+    // ① 定義されているか
+    FuncSig *f = lookup_func(s, n->name);
+    if (!f) {
+        Diag d = {0};
+        d.message = diag_fmt("未定義の関数 '%s' です", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この関数は定義されていません";
+        d.hint = "関数名の綴りを確認してください"
+                 "（定義の順序は問いません。後ろで定義した関数も呼べます）";
+        diag_fail(&d);
+    }
+
+    // ③ 引数の個数（② の「呼び出し可能か」は構文が保証している）
+    int nargs = 0;
+    for (Node *a = n->args; a; a = a->next) nargs++;
+    if (nargs != f->nparams) {
+        Diag d = {0};
+        d.message = diag_fmt("関数 '%s' は %d 個の引数を取りますが、%d 個渡されました",
+                             f->name, f->nparams, nargs);
+        d.primary.tok = n->tok;
+        d.primary.label = "呼び出しの引数の個数が違います";
+        d.related.tok = f->tok;
+        d.related.label = "この関数はここで定義されています";
+        diag_fail(&d);
+    }
+
+    // ④ 各引数の型
+    int i = 0;
+    for (Node *a = n->args; a; a = a->next, i++) {
+        Type *at = check_expr(s, a);
+        if (!type_equal(at, f->params[i])) {
+            Diag d = {0};
+            d.message = diag_fmt("関数 '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
+                                 f->name, i + 1, type_name(at),
+                                 type_name(f->params[i]));
+            d.primary.tok = a->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+            d.related.tok = f->tok;
+            d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i],
+                                       type_name(f->params[i]));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+    }
+    return f->ret;
+}
+
+// return の検査
+static void check_return(Sema *s, Node *n) {
+    Type *want = s->cur_func->ret;
+
+    if (!n->lhs) {  // return（値なし）
+        if (want->kind != TY_NONE) {
+            Diag d = {0};
+            d.message = diag_fmt("関数 '%s' は '%s' を返さなければなりません",
+                                 s->cur_func->name, type_name(want));
+            d.primary.tok = n->tok;
+            d.primary.label = "この return には値がありません";
+            d.related.tok = s->cur_func->tok;
+            d.related.label = "戻り型はここで宣言されています";
+            diag_fail(&d);
+        }
+        return;
+    }
+
+    Type *got = check_expr(s, n->lhs);
+    if (want->kind == TY_NONE) {
+        Diag d = {0};
+        d.message = diag_fmt("戻り型が None の関数 '%s' は値を返せません",
+                             s->cur_func->name);
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = diag_fmt("型 '%s' の式", type_name(got));
+        d.related.tok = s->cur_func->tok;
+        d.related.label = "戻り型はここで宣言されています";
+        diag_fail(&d);
+    }
+    if (!type_equal(got, want)) {
+        Diag d = {0};
+        d.message = "return の型が戻り型と一致しません";
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = diag_fmt("型 '%s' の式", type_name(got));
+        d.related.tok = s->cur_func->tok;
+        d.related.label = diag_fmt("関数 '%s' の戻り型は '%s' です", s->cur_func->name,
+                                   type_name(want));
+        d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
         diag_fail(&d);
     }
 }
@@ -421,7 +561,7 @@ static void check_stmt(Sema *s, Node *n) {
         case ND_VARDECL: check_vardecl(s, n); break;
         case ND_ASSIGN: check_assign(s, n); break;
         case ND_BLOCK: check_block(s, n); break;
-        case ND_PRINT: check_print(s, n); break;
+        case ND_RETURN: check_return(s, n); break;
         case ND_PASS: break;  // 何もしない
 
         case ND_IF:
@@ -459,51 +599,238 @@ static void check_stmt(Sema *s, Node *n) {
 
 // ── 入口 ───────────────────────────────────────────────────
 
-// 値を持つノード（式）か。
-// 暫定仕様「プログラムの値は最後の文の値」の検査に使います。
-static bool is_expr_node(NodeKind k) {
-    switch (k) {
-        case ND_INT:
-        case ND_BOOL:
-        case ND_VAR:
-        case ND_BINOP:
-        case ND_LOGICAL:
-        case ND_UNARY:
+// この文を実行したら、必ず関数から抜けるか（型システム 6.1）。
+//
+// ⚠️ 保守的に判定します。「実際には到達しない」経路でも return を要求します。
+//    コンパイラが人間より賢くなろうとすると必ず破綻します。
+//
+// 📖 codegen の e->terminated と同じことを、別の場所でやっています。
+//    こちらは AST の上（構造を見る／ユーザーに教えるため）、
+//    あちらは命令列の上（出力を見る／正しい IR を出すため）。
+static bool always_returns(Node *n) {
+    if (!n) return false;
+
+    switch (n->kind) {
+        case ND_RETURN:
             return true;
+
+        case ND_IF:
+            // else が無ければ、条件が偽のときに素通りする
+            return n->els && always_returns(n->body) && always_returns(n->els);
+
+        case ND_BLOCK:
+            // 1 つでも「必ず抜ける」文があればよい（その後ろは到達不能）
+            for (Node *st = n->body; st; st = st->next)
+                if (always_returns(st)) return true;
+            return false;
+
+        // while True: は break が無ければ抜けないが、v1 では判定しない
         default:
             return false;
     }
+}
+
+// ── パス 1：宣言の登録 ─────────────────────────────────────
+
+static void declare_func(Sema *s, Node *n) {
+    if (strcmp(n->name, "print") == 0)
+        error_at_hint(n->tok, "print は組み込み関数です。別の名前を使ってください",
+                      "'print' は再定義できません");
+
+    FuncSig *prev = lookup_func(s, n->name);
+    if (prev) {
+        Diag d = {0};
+        d.message = diag_fmt("関数 '%s' は既に定義されています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "ここで再定義されています";
+        d.related.tok = prev->tok;
+        d.related.label = "最初の定義はここです";
+        diag_fail(&d);
+    }
+
+    Type *ret = type_from_name(n->type_name);
+    if (!ret) {
+        Diag d = {0};
+        d.message = diag_fmt("未知の型名 '%s' です", n->type_name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この戻り型は存在しません";
+        d.hint = diag_fmt("現在使える型: %s", type_name_list());
+        diag_fail(&d);
+    }
+
+    int nparams = 0;
+    for (Node *pm = n->params; pm; pm = pm->next) nparams++;
+
+    FuncSig *f = xmalloc(sizeof(FuncSig));
+    f->name = n->name;
+    f->ret = ret;
+    f->nparams = nparams;
+    f->params = nparams ? xmalloc(sizeof(Type *) * (size_t)nparams) : NULL;
+    f->pnames = nparams ? xmalloc(sizeof(char *) * (size_t)nparams) : NULL;
+    f->tok = n->tok;
+
+    int i = 0;
+    for (Node *pm = n->params; pm; pm = pm->next, i++) {
+        Type *pt = type_from_name(pm->type_name);
+        if (!pt) {
+            Diag d = {0};
+            d.message = diag_fmt("未知の型名 '%s' です", pm->type_name);
+            d.primary.tok = pm->tok;
+            d.primary.label = "この型は存在しません";
+            d.hint = diag_fmt("現在使える型: %s", type_name_list());
+            diag_fail(&d);
+        }
+        if (pt->kind == TY_NONE)
+            error_at_hint(pm->tok, "None 型の値は存在しないので引数にできません",
+                          "引数の型に None は使えません");
+        f->params[i] = pt;
+        f->pnames[i] = pm->name;
+        pm->type = pt;
+    }
+
+    f->next = s->funcs;
+    s->funcs = f;
+    n->type = ret;
+}
+
+// グローバル変数の登録（言語仕様 6.2）
+static void declare_global(Sema *s, Node *n) {
+    Type *declared = type_from_name(n->type_name);
+    if (!declared) {
+        Diag d = {0};
+        d.message = diag_fmt("未知の型名 '%s' です", n->type_name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この型は存在しません";
+        d.hint = diag_fmt("現在使える型: %s", type_name_list());
+        diag_fail(&d);
+    }
+    if (declared->kind == TY_NONE)
+        error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
+                      "変数の型に None は使えません");
+
+    VarEntry *prev = lookup_local(s, n->name);
+    if (prev) {
+        Diag d = {0};
+        d.message = diag_fmt("変数 '%s' は既に宣言されています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "ここで再宣言されています";
+        d.related.tok = prev->decl_tok;
+        d.related.label = "最初の宣言はここです";
+        diag_fail(&d);
+    }
+
+    // ⚠️ 初期化式はコンパイル時定数のみ（言語仕様 6.2 の v1 制限）。
+    //    計算を許すと「どちらを先に初期化するか」という初期化順序問題が起きます。
+    if (n->rhs->kind != ND_INT && n->rhs->kind != ND_BOOL) {
+        Diag d = {0};
+        d.message = "グローバル変数の初期化式は定数でなければなりません";
+        d.primary.tok = n->rhs->tok;
+        d.primary.label = "ここには整数か True / False だけが書けます";
+        d.hint = "計算が必要なら main の中でローカル変数にしてください";
+        diag_fail(&d);
+    }
+
+    Type *actual = check_expr(s, n->rhs);
+    if (!type_equal(actual, declared)) {
+        Diag d = {0};
+        d.message = "型が一致しません";
+        d.primary.tok = n->rhs->tok;
+        d.primary.label = diag_fmt("型 '%s' の式", type_name(actual));
+        d.related.tok = n->tok;
+        d.related.label = diag_fmt("変数 '%s' は '%s' 型として宣言されています",
+                                   n->name, type_name(declared));
+        diag_fail(&d);
+    }
+
+    // グローバルの IR 名は @g.x。C のシンボルや @main と衝突させないため。
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "@g.%s", n->name);
+
+    VarEntry *v = xmalloc(sizeof(VarEntry));
+    v->name = n->name;
+    v->ir_name = sb_str(&sb);
+    v->is_global = true;
+    v->type = declared;
+    v->decl_tok = n->tok;
+    v->next = s->scope->vars;
+    s->scope->vars = v;
+
+    n->ir_name = v->ir_name;
+    n->is_global = true;
+    n->type = declared;
+}
+
+// ── パス 2：本体の検査 ─────────────────────────────────────
+
+static void check_func(Sema *s, Node *n) {
+    s->cur_func = lookup_func(s, n->name);
+    s->used = NULL;  // IR 名は関数ごとに振り直す（別の関数なら衝突しない）
+
+    scope_push(s);
+
+    // 引数をローカル変数として登録する
+    for (Node *pm = n->params; pm; pm = pm->next) {
+        VarEntry *v = declare(s, pm->name, pm->type, pm->tok);
+        pm->ir_name = v->ir_name;
+    }
+
+    for (Node *st = n->body->body; st; st = st->next) check_stmt(s, st);
+    scope_pop(s);
+
+    // 全経路で return するか（型システム 6.1）
+    if (n->type->kind != TY_NONE && !always_returns(n->body)) {
+        Diag d = {0};
+        d.message = diag_fmt("関数 '%s' は値を返さずに終わる経路があります", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = diag_fmt("戻り型は '%s' です", type_name(n->type));
+        d.hint = "すべての経路で return してください"
+                 "（if に else が無いと、条件が偽のとき素通りします）";
+        diag_fail(&d);
+    }
+    s->cur_func = NULL;
+}
+
+// main の検査（言語仕様 6.1）
+static void check_main(Sema *s, Node *ast) {
+    FuncSig *m = lookup_func(s, "main");
+    if (!m) {
+        Diag d = {0};
+        d.message = "main 関数がありません";
+        d.primary.tok = ast->tok;
+        d.primary.label = "このファイルには入口がありません";
+        d.hint = "プログラムの入口として次を定義してください:\n"
+                 "             def main() -> int:\n"
+                 "                 return 0";
+        diag_fail(&d);
+    }
+    if (m->nparams != 0)
+        error_at_hint(m->tok, "main は引数なしで定義してください（def main() -> int:）",
+                      "main は引数を取れません");
+    if (m->ret->kind != TY_INT)
+        error_at_hint(m->tok, "main の戻り値がプロセスの終了コードになります",
+                      "main の戻り型は int でなければなりません");
 }
 
 void sema(Node *ast) {
     if (ast->kind != ND_BLOCK) UNREACHABLE();
 
     Sema s = {0};
-    scope_push(&s);  // トップレベルのスコープ
+    scope_push(&s);  // グローバルスコープ
 
-    Node *last = NULL;
-    for (Node *stmt = ast->body; stmt; stmt = stmt->next) {
-        check_stmt(&s, stmt);
-        last = stmt;
+    // ── パス 1：シグネチャとグローバル変数を先に全部登録する ──
+    // ★ 本体を見る前に登録するので、前方参照も再帰も自然に通ります。
+    //   C がプロトタイプ宣言を要求するのは、この 2 パスを人間にやらせているからです。
+    for (Node *d = ast->body; d; d = d->next) {
+        if (d->kind == ND_FUNC) declare_func(&s, d);
+        else if (d->kind == ND_VARDECL) declare_global(&s, d);
+        else UNREACHABLE();  // parser が保証している
     }
 
-    // ⚠️ 暫定仕様：プログラムの値は最後の文の値なので、
-    //    最後の文は「値を持つ式」でなければなりません。
-    //    第8章で `def main() -> int:` と `return` に置き換わります。
-    // ★ 第7章で条件を反転しました。
-    //   第5章は「宣言か代入なら駄目」と書いていましたが、文の種類が増えると
-    //   足し忘れます（if / while / print / break ... すべて値を持ちません）。
-    //   「値を持つのはこれだけ」と列挙するほうが、増えても安全です。
-    if (!is_expr_node(last->kind)) {
-        Diag d = {0};
-        d.message = "プログラムの最後は式でなければなりません";
-        d.primary.tok = last->tok;
-        d.primary.label = "この文は値を持ちません";
-        d.hint = "最後に値となる式を書いてください"
-                 "（第8章で `def main() -> int:` と return に置き換わります）";
-        diag_fail(&d);
-    }
+    // ── パス 2：本体を検査する ──
+    for (Node *d = ast->body; d; d = d->next)
+        if (d->kind == ND_FUNC) check_func(&s, d);
 
-    ast->type = last->type;
+    check_main(&s, ast);
     scope_pop(&s);
 }

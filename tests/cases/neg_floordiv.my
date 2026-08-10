@@ -1,4 +1,5 @@
 # EXIT: 253
 # ⚠️ Python 非互換: -7 // 2 は Python では -4、Mython では -3（sdiv の切り捨て）
 # 終了コードは下位8bitなので -3 は 253 になる
--7 // 2
+def main() -> int:
+    return -7 // 2

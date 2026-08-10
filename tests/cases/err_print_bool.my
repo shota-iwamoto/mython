@@ -1,4 +1,5 @@
 # ERROR: print はまだ 'bool' 型を出力できません
-# ERROR: = ヒント: 第7章の print は int 専用の暫定実装です
-print(True)
-0
+# ERROR: = ヒント: print は今のところ int 専用です
+def main() -> int:
+    print(True)
+    return 0

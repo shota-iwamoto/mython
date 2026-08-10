@@ -1,7 +1,8 @@
 # OUTPUT: 3
-x: int = 1
-y: int = 2
-if x == 1:
-    if y == 2:
-        print(3)
-0
+def main() -> int:
+    x: int = 1
+    y: int = 2
+    if x == 1:
+        if y == 2:
+            print(3)
+    return 0

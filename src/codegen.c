@@ -1,5 +1,7 @@
 #include "codegen.h"
 
+#include <string.h>
+
 #include "diag.h"
 
 #include <stdio.h>
@@ -73,7 +75,8 @@ static char *new_tmp(Emitter *e) {
 static const char *llvm_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
-        case TY_BOOL: return "i1";  // レジスタ上は 1 ビット
+        case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
+        case TY_NONE: return "void";  // 値がない（第8章）
         default: UNREACHABLE();
     }
 }
@@ -87,22 +90,17 @@ static const char *llvm_mem_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
+        // ⚠️ TY_NONE はメモリ上の表現を持ちません。
+        //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
     }
 }
 
-// 変数の「箱」の名前（alloca したポインタ）。
-//
-// ⚠️ シャドーイングを禁止している（言語仕様 5.1）ので、
-//    変数名がそのまま一意な IR 名になります。
-//    第7章でブロックスコープが入り、第8章で関数が入っても、
-//    同名の変数が同時に存在しないため衝突しません。
-static char *var_ptr(const char *name) {
-    StrBuf sb;
-    sb_init(&sb);
-    sb_printf(&sb, "%%%s", name);
-    return sb_str(&sb);
-}
+// ★ 第8章：変数の IR 名は sema が「記号まで含めた完全な形」で割り当てます。
+//    ローカル  : %x, %x.1
+//    グローバル: @g.x
+//    引数      : %n（%n.arg から alloca にコピーしたもの。規約 R8）
+//    codegen 側で名前を組み立てる必要はもうありません（var_ptr は廃止）。
 
 // 二項演算子に対応する LLVM 命令の名前を返す。
 //
@@ -228,6 +226,7 @@ static void ensure_block(Emitter *e) {
 // 即値（"42"）とレジスタ（"%t0"）を同じ char * で扱えるので、
 // 呼び出し側で場合分けが不要になります。
 static char *gen_logical(Emitter *e, Node *n);
+static char *gen_call(Emitter *e, Node *n);
 
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
@@ -269,10 +268,13 @@ static char *gen_expr(Emitter *e, Node *n) {
         case ND_LOGICAL:
             return gen_logical(e, n);
 
+        case ND_CALL:
+            return gen_call(e, n);
+
         case ND_VAR:
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
             // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
-            return gen_load(e, n->type, var_ptr(n->ir_name));
+            return gen_load(e, n->type, n->ir_name);
 
         case ND_UNARY: {
             char *v = gen_expr(e, n->lhs);
@@ -415,7 +417,7 @@ static void gen_while(Emitter *e, Node *n) {
 // print(e) の暫定実装。C の printf を借ります。
 //
 // ★ 第1章で用意した globals / decls バッファが、ここで初めて使われます。
-static void gen_print(Emitter *e, Node *n) {
+static void gen_print_call(Emitter *e, Node *n) {
     // 書式文字列と declare は、最初に print が現れたときに 1 回だけ出す
     if (!e->printf_declared) {
         // ⚠️ [6 x i8] の 6 は "%lld\n\0" のバイト数。数え間違えると壊れます。
@@ -426,11 +428,42 @@ static void gen_print(Emitter *e, Node *n) {
         e->printf_declared = true;
     }
 
-    char *v = gen_expr(e, n->lhs);
+    char *v = gen_expr(e, n->args);
     char *t = new_tmp(e);
     // ⚠️ 可変長引数の呼び出しには関数型 (ptr, ...) を書く必要があります。
     sb_printf(&e->fn, "  %s = call i32 (ptr, ...) @printf(ptr @.fmt.int, i64 %s)\n",
               t, v);
+}
+
+// 関数呼び出し。
+//
+// ⚠️ void の呼び出しに結果を代入してはいけません。
+//      %t0 = call void @f()   ✗
+//      call void @f()         ✅
+static char *gen_call(Emitter *e, Node *n) {
+    if (strcmp(n->name, "print") == 0) {
+        gen_print_call(e, n);
+        return NULL;
+    }
+
+    // 引数を左から順に評価する（言語仕様 4.5）
+    StrBuf args;
+    sb_init(&args);
+    bool first = true;
+    for (Node *a = n->args; a; a = a->next) {
+        char *v = gen_expr(e, a);
+        sb_printf(&args, "%s%s %s", first ? "" : ", ", llvm_type(a->type), v);
+        first = false;
+    }
+
+    if (n->type->kind == TY_NONE) {
+        sb_printf(&e->fn, "  call void @%s(%s)\n", n->name, sb_str(&args));
+        return NULL;
+    }
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type), n->name,
+              sb_str(&args));
+    return t;
 }
 
 // ── 文の生成 ────────────────────────────────────────────────
@@ -454,7 +487,16 @@ static char *gen_stmt(Emitter *e, Node *n) {
 
         case ND_IF: gen_if(e, n); return NULL;
         case ND_WHILE: gen_while(e, n); return NULL;
-        case ND_PRINT: gen_print(e, n); return NULL;
+        case ND_RETURN: {
+            if (!n->lhs) {
+                sb_printf(&e->fn, "  ret void\n");  // 規約 R9
+            } else {
+                char *v = gen_expr(e, n->lhs);
+                sb_printf(&e->fn, "  ret %s %s\n", llvm_type(n->lhs->type), v);
+            }
+            e->terminated = true;
+            return NULL;
+        }
         case ND_PASS: return NULL;  // 本当に何も出さない
 
         // 飛び先は sema が保証している（ループの外なら検査で弾かれる）
@@ -464,13 +506,13 @@ static char *gen_stmt(Emitter *e, Node *n) {
         case ND_VARDECL: {
             // alloca は entry ブロックに出済み（規約 R1）。ここでは store だけ。
             char *val = gen_expr(e, n->rhs);
-            gen_store(e, n->type, val, var_ptr(n->ir_name));
+            gen_store(e, n->type, val, n->ir_name);
             return NULL;
         }
 
         case ND_ASSIGN: {
             char *val = gen_expr(e, n->rhs);
-            gen_store(e, n->type, val, var_ptr(n->lhs->ir_name));
+            gen_store(e, n->type, val, n->lhs->ir_name);
             return NULL;
         }
 
@@ -492,8 +534,9 @@ static char *gen_stmt(Emitter *e, Node *n) {
 static void collect_allocas(Emitter *e, Node *n) {
     if (!n) return;
 
-    if (n->kind == ND_VARDECL)
-        sb_printf(&e->allocas, "  %s = alloca %s\n", var_ptr(n->ir_name),
+    // ⚠️ グローバル変数は alloca しない（@g.x をそのまま読み書きする）
+    if (n->kind == ND_VARDECL && !n->is_global)
+        sb_printf(&e->allocas, "  %s = alloca %s\n", n->ir_name,
                   llvm_mem_type(n->type));  // ★ bool は i8（規約 R5）
 
     // 子と兄弟をたどる。
@@ -507,12 +550,11 @@ static void collect_allocas(Emitter *e, Node *n) {
 
 // ── 関数の生成 ──────────────────────────────────────────────
 
-// ユーザーのプログラム本体を @mython_main として出力する。
+// 1 つの関数を出力する。
 //
-// 第1章ではプログラム全体がただ 1 つの式なので、
-// 「その式を評価して返すだけの関数」になります。
-static void gen_mython_main(Emitter *e, Node *ast) {
-    // 関数ごとにリセットする（規約）
+// ★ 第8章：第1章から「暗黙の main」だったものが、ここで普通の関数になりました。
+static void gen_func(Emitter *e, Node *n) {
+    // 関数ごとに状態をリセットする（第1章から決めてあった規約）
     e->tmp_counter = 0;
     e->label_counter = 0;
     e->terminated = false;
@@ -520,33 +562,62 @@ static void gen_mython_main(Emitter *e, Node *ast) {
     sb_init(&e->allocas);
     sb_init(&e->fn);
 
-    // ① まず全変数の alloca を集める（第5章のまま）→ e->allocas
-    collect_allocas(e, ast);
+    // main はラッパ方式（規約 7 節の方式 A）なので @mython_main として出す
+    const char *ir_name =
+        strcmp(n->name, "main") == 0 ? "mython_main" : n->name;
 
-    // ② 本体：文を順に生成し、最後の式文の値を返す。
-    //    この生成中に、短絡評価が必要とする alloca が e->allocas に増えます。
-    char *last = NULL;
-    for (Node *s = ast->body; s; s = s->next) {
-        char *v = gen_stmt(e, s);
-        if (v) last = v;
+    // ① 引数を alloca にコピーする（規約 R8）。
+    //
+    // 🤔 なぜコピーするのか
+    //   %n.arg は SSA レジスタなので代入できません。Mython では引数に代入
+    //   できる（a = a + 1）ので、ローカル変数と同じ「箱」にしてしまいます。
+    //   mem2reg がこの余分なコピーを消してくれます。
+    for (Node *pm = n->params; pm; pm = pm->next) {
+        sb_printf(&e->allocas, "  %s = alloca %s\n", pm->ir_name,
+                  llvm_mem_type(pm->type));
+        StrBuf arg;
+        sb_init(&arg);
+        sb_printf(&arg, "%%%s.arg", pm->name);
+        gen_store(e, pm->type, sb_str(&arg), pm->ir_name);
     }
-    if (!last) UNREACHABLE();  // sema が「最後は式」を保証している
 
-    // 最後の式が bool なら i64 に広げてから返す。
-    // （@mython_main は i64 を返す。第8章で def main() -> int: になれば消えます）
-    if (ast->type->kind == TY_BOOL) {
-        char *t = new_tmp(e);
-        sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", t, last);
-        last = t;
+    // ② ローカル変数の alloca（第5章のまま）
+    collect_allocas(e, n->body);
+
+    // ③ 本体
+    gen_stmt(e, n->body);
+
+    // ④ 終端されていなければ終端する（規約 R6）
+    if (!e->terminated) {
+        if (n->type->kind == TY_NONE) {
+            sb_printf(&e->fn, "  ret void\n");  // 規約 R9
+        } else {
+            // 全経路 return は sema が保証済み。ここに来るのは
+            // 「if/else の両方が return して合流点が到達不能」の場合。
+            sb_printf(&e->fn, "  unreachable\n");
+        }
     }
-    sb_printf(&e->fn, "  ret i64 %s\n", last);
 
-    // ③ 組み立て：entry の直後に alloca をまとめて差し込む（規約 R1）
-    sb_printf(&e->body, "define i64 @mython_main() {\n");
-    sb_printf(&e->body, "entry:\n");
+    // ⑤ 組み立て
+    sb_printf(&e->body, "\ndefine %s @%s(", llvm_type(n->type), ir_name);
+    bool first = true;
+    for (Node *pm = n->params; pm; pm = pm->next) {
+        sb_printf(&e->body, "%s%s %%%s.arg", first ? "" : ", ",
+                  llvm_type(pm->type), pm->name);
+        first = false;
+    }
+    sb_printf(&e->body, ") {\nentry:\n");
     sb_printf(&e->body, "%s", sb_str(&e->allocas));
     sb_printf(&e->body, "%s", sb_str(&e->fn));
     sb_printf(&e->body, "}\n");
+}
+
+// グローバル変数を出力する（言語仕様 6.2）
+static void gen_global(Emitter *e, Node *n) {
+    // 初期化式が定数であることは sema が保証している
+    long long init = n->rhs->ival;
+    sb_printf(&e->globals, "%s = global %s %lld\n", n->ir_name,
+              llvm_mem_type(n->type), init);
 }
 
 // C の main を出力する。
@@ -593,9 +664,13 @@ char *codegen(Node *ast, const char *source_name) {
     if (MYTHON_TARGET_TRIPLE[0])
         sb_printf(&e.header, "target triple = \"%s\"\n", MYTHON_TARGET_TRIPLE);
 
-    // ⑤ 関数定義
-    sb_printf(&e.body, "\n");
-    gen_mython_main(&e, ast);
+    // ⑤ グローバル変数と関数定義
+    for (Node *d = ast->body; d; d = d->next) {
+        if (d->kind == ND_VARDECL) gen_global(&e, d);
+    }
+    for (Node *d = ast->body; d; d = d->next) {
+        if (d->kind == ND_FUNC) gen_func(&e, d);
+    }
     gen_c_main(&e);
 
     // 4 つのバッファを規定の順に連結する

@@ -165,6 +165,29 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_FUNC:
+            printf("(func %s -> %s\n", n->name, n->type_name);
+            for (Node *pm = n->params; pm; pm = pm->next) dump(pm, depth + 1);
+            dump(n->body, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_PARAM:
+            printf("(param %s %s)\n", n->name, n->type_name);
+            break;
+        case ND_CALL:
+            printf("(call %s\n", n->name);
+            for (Node *a = n->args; a; a = a->next) dump(a, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_RETURN:
+            if (!n->lhs) { printf("(return)\n"); break; }
+            printf("(return\n");
+            dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_BLOCK:
             printf("(block\n");
             for (Node *s = n->body; s; s = s->next) dump(s, depth + 1);

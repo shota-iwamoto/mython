@@ -2,4 +2,5 @@
 # ERROR: 2 つ目の比較演算子です
 # ERROR: 1 つ目の比較演算子はここです
 # ERROR: = ヒント: Python と違い連鎖比較は使えません
-1 < 2 < 3
+def main() -> int:
+    return 1 < 2 < 3

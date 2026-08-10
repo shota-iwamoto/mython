@@ -1,4 +1,5 @@
 # OUTPUT: 1
-if True:
-    print(1)
-0
+def main() -> int:
+    if True:
+        print(1)
+    return 0

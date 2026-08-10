@@ -1,4 +1,5 @@
 # ERROR: 未定義の名前 'z' に代入しています
 # ERROR: = ヒント: 初めて使うときは型注釈が必要です（例: z: int = 0）
-z = 1
-z
+def main() -> int:
+    z = 1
+    return z

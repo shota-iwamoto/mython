@@ -1,4 +1,5 @@
 # EXIT: 7
-a: int = 3
-b: int = a + 4
-b
+def main() -> int:
+    a: int = 3
+    b: int = a + 4
+    return b

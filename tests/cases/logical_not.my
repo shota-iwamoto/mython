@@ -1,2 +1,5 @@
 # EXIT: 1
-not False
+def main() -> int:
+    if not False:
+        return 1
+    return 0

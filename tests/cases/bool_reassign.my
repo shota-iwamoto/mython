@@ -1,4 +1,7 @@
 # EXIT: 0
-flag: bool = True
-flag = False
-flag
+def main() -> int:
+    flag: bool = True
+    flag = False
+    if flag:
+        return 1
+    return 0

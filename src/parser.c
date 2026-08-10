@@ -139,6 +139,7 @@ static Token *expect(Parser *p, TokenKind kind, const char *what,
 //   primary     ::= INT | True | False | IDENT | "(" expr ")"   強い ↓
 
 static Node *expr(Parser *p);
+static Token *type_name_token(Parser *p, const char *what);
 
 // primary ::= INT | "(" expr ")"
 static Node *primary(Parser *p) {
@@ -193,7 +194,47 @@ static Node *primary(Parser *p) {
     diag_fail(&d);
 }
 
-// power ::= primary [ "**" unary ]
+// postfix ::= primary { "(" [ arg_list ] ")" }
+//
+// ★ 呼び出しは「後置演算子」。優先順位は最も強い部類なので、
+//   階層のいちばん下（primary のすぐ上）に 1 段挟みます。
+//   第10章で xs[0] や p.f を足すときも、このループに追加するだけです。
+static Node *postfix(Parser *p) {
+    Node *n = primary(p);
+
+    for (;;) {
+        Token *open = peek(p);
+        if (!consume(p, "(")) return n;
+
+        // 呼べるのは名前だけ（第一級関数は v1 未対応）
+        if (n->kind != ND_VAR) {
+            Diag d = {0};
+            d.message = "この式は呼び出せません";
+            d.primary.tok = n->tok;
+            d.primary.label = "呼び出せるのは関数の名前だけです";
+            d.hint = "関数を値として扱うことは v1 では対応していません";
+            diag_fail(&d);
+        }
+
+        Node *call = new_node(ND_CALL, n->tok);
+        call->name = n->name;
+
+        Node head = {0};
+        Node *cur = &head;
+        if (!tok_is(peek(p), ")")) {
+            for (;;) {
+                cur->next = expr(p);
+                cur = cur->next;
+                if (!consume(p, ",")) break;
+            }
+        }
+        expect_close(p, ")", open);
+        call->args = head.next;
+        n = call;
+    }
+}
+
+// power ::= postfix [ "**" unary ]
 //
 // ⚠️ '**' は第9章で実装します（負の指数を実行時エラーにするため
 //    ランタイムが必要）。今は親切なメッセージを出すだけにします。
@@ -210,7 +251,7 @@ static Node *primary(Parser *p) {
 //            return new_binop_node(t, OP_POW, base, unary(p));
 //        return base;
 static Node *power(Parser *p) {
-    Node *base = primary(p);
+    Node *base = postfix(p);  // ★ 第8章：primary から postfix に差し替え
 
     Token *t = peek(p);
     if (tok_is(t, "**"))
@@ -414,11 +455,7 @@ static Node *var_decl(Parser *p) {
 
     // 型注釈。ここでは「名前を記録する」だけで、
     // それが有効な型かどうかの判断は sema に任せます。
-    Token *ty_tok = peek(p);
-    if (ty_tok->kind != TK_IDENT)
-        error_at_hint(ty_tok, "型注釈には型名を書きます（例: x: int = 0）",
-                      "型名が必要です");
-    advance(p);
+    Token *ty_tok = type_name_token(p, "型注釈には型名を書きます（例: x: int = 0）");
 
     // 初期化式は必須（言語仕様 5.1：未初期化変数を作らせない）
     if (!tok_is(peek(p), "=")) {
@@ -457,21 +494,6 @@ static int aug_op(Token *t) {
 //
 //   こうすると xs[0] = 1 や p.f = 1（第10章・第12章）にも
 //   そのまま対応できます。左辺を読み切るまで代入かどうか判らないからです。
-// print_stmt ::= "print" "(" expr ")"
-//
-// ⚠️ 暫定実装です。言語仕様では print は組み込み「関数」ですが、
-//    関数呼び出しの構文は第8章、str 型は第9章なので、
-//    この章では「文」として特別扱いします（第1章の暫定 main と同じ足場）。
-static Node *print_stmt(Parser *p) {
-    Token *t = advance(p);     // "print"
-    Token *open = advance(p);  // "("
-
-    Node *n = new_node(ND_PRINT, t);
-    n->lhs = expr(p);
-    expect_close(p, ")", open);
-    return n;
-}
-
 static Node *simple_stmt(Parser *p) {
     Token *t0 = peek(p);
 
@@ -480,11 +502,14 @@ static Node *simple_stmt(Parser *p) {
     if (tok_is_kw(t0, "continue")) { advance(p); return new_node(ND_CONTINUE, t0); }
     if (tok_is_kw(t0, "pass")) { advance(p); return new_node(ND_PASS, t0); }
 
-    // print( ... ) は暫定の組み込み文。
-    // print は予約語ではないので、IDENT "print" の次が '(' かで判定します（2 トークン先読み）。
-    if (t0->kind == TK_IDENT && strcmp(t0->text, "print") == 0 &&
-        tok_is(peek_at(p, 1), "("))
-        return print_stmt(p);
+    // return_stmt ::= "return" [ expr ]
+    if (tok_is_kw(t0, "return")) {
+        advance(p);
+        Node *n = new_node(ND_RETURN, t0);
+        // 値の有無は「次が改行か」で判断する
+        if (peek(p)->kind != TK_NEWLINE) n->lhs = expr(p);
+        return n;
+    }
 
     // IDENT の次が ':' なら変数宣言。2 トークン先読みで判別する。
     if (peek(p)->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) return var_decl(p);
@@ -493,7 +518,21 @@ static Node *simple_stmt(Parser *p) {
     Token *t = peek(p);
 
     int aug = aug_op(t);
-    if (!tok_is(t, "=") && aug < 0) return lhs;  // 代入ではない → 式文
+    if (!tok_is(t, "=") && aug < 0) {
+        // 式文になれるのは呼び出しだけ（docs/spec/type-system.md 6 節）。
+        //
+        // ★ 第7章までは「プログラムの値＝最後の式」だったので、裸の式を
+        //   文として書けました。第8章で足場を外したので本来の厳しさに戻します。
+        if (lhs->kind != ND_CALL) {
+            Diag d = {0};
+            d.message = "この式は文として書けません";
+            d.primary.tok = lhs->tok;
+            d.primary.label = "計算した値がどこにも使われていません";
+            d.hint = "結果を変数に代入するか、関数の呼び出しを書いてください";
+            diag_fail(&d);
+        }
+        return lhs;  // 式文（呼び出し）
+    }
 
     // ここから代入。左辺が代入先になれるか確認する。
     if (lhs->kind != ND_VAR) {
@@ -631,11 +670,89 @@ static Node *stmt(Parser *p) {
     return s;
 }
 
-// program ::= { stmt } EOF
+// 型注釈に書ける名前を 1 つ読む。
 //
-// ⚠️ 暫定仕様：トップレベルは式文の並びで、
-//    プログラムの値は「最後の式の値」になります。
-//    第8章で `def main() -> int:` が正式な入口になったら置き換えます。
+// ⚠️ 'None' は予約語（TK_KEYWORD）なので、IDENT だけを受け付けると弾かれます。
+//    型名として書ける予約語は今のところ None だけです。
+static Token *type_name_token(Parser *p, const char *what) {
+    Token *t = peek(p);
+    if (t->kind == TK_IDENT || tok_is_kw(t, "None")) {
+        advance(p);
+        return t;
+    }
+    error_at_hint(t, what, "型名が必要です");
+}
+
+// param ::= IDENT ":" type
+static Node *param(Parser *p) {
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok, "引数は「名前: 型」の形で書きます（例: n: int）",
+                      "引数名が必要です");
+    advance(p);
+
+    if (!consume(p, ":"))
+        error_at_hint(peek(p), "引数には型注釈が必須です（例: n: int）",
+                      "引数名の後に ':' が必要です");
+
+    Token *ty_tok = type_name_token(p, "引数には型注釈が必須です（例: n: int）");
+
+    Node *n = new_node(ND_PARAM, name_tok);
+    n->name = name_tok->text;
+    n->type_name = ty_tok->text;
+    return n;
+}
+
+// func_def ::= "def" IDENT "(" [ param_list ] ")" "->" type ":" block
+static Node *func_def(Parser *p) {
+    Token *kw = advance(p);  // "def"
+
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok, "def の後には関数名を書きます（例: def f() -> int:）",
+                      "関数名が必要です");
+    advance(p);
+
+    Node *n = new_node(ND_FUNC, kw);
+    n->name = name_tok->text;
+
+    Token *open = peek(p);
+    if (!consume(p, "("))
+        error_at_hint(open, "関数名の後には引数リストが必要です（例: f() や f(n: int)）",
+                      "'(' が必要です");
+
+    Node head = {0};
+    Node *cur = &head;
+    if (!tok_is(peek(p), ")")) {
+        for (;;) {
+            cur->next = param(p);
+            cur = cur->next;
+            if (!consume(p, ",")) break;
+        }
+    }
+    expect_close(p, ")", open);
+    n->params = head.next;
+
+    // 戻り型は必須（言語仕様 3.3）。
+    // 🤔 省略を許すと再帰関数で「戻り型を知るには本体が要り、
+    //    本体を見るには戻り型が要る」という循環に陥ります。
+    if (!consume(p, "->"))
+        error_at_hint(peek(p),
+                      "戻り型は省略できません。値を返さないなら -> None と書きます",
+                      "'->' と戻り型が必要です");
+
+    Token *ret_tok = type_name_token(p, "戻り型には型名を書きます（例: -> int / -> None）");
+    n->type_name = ret_tok->text;
+
+    expect_colon(p, "def の宣言");
+    n->body = block(p);
+    return n;
+}
+
+// program ::= { func_def | global_var | NEWLINE } EOF
+//
+// ★ 第8章でトップレベルが「宣言だけ」になりました（言語仕様 6.3）。
+//   実行文は書けません。プログラムの入口は def main() -> int: です。
 static Node *program(Parser *p) {
     // ★ 「ダミーの先頭ノード」を使うと、リスト構築が分岐なしで書けます。
     //   head.next が最初の要素になり、「空かどうか」の場合分けが消えます。
@@ -645,15 +762,15 @@ static Node *program(Parser *p) {
     Token *first = peek(p);
 
     while (peek(p)->kind != TK_EOF) {
-        // トップレベルにインデントされた行が来た。
-        // ブロックを作る構文（if / while / def）はまだ無いので、必ず誤り。
         Token *t = peek(p);
+
         if (t->kind == TK_INDENT) {
             Diag d = {0};
             d.message = "予期しないインデントです";
             d.primary.tok = t;
             d.primary.label = "この行が余分に字下げされています";
-            d.hint = "ブロックを作る構文（if / while / def）は第7章以降で実装します";
+            d.hint = "トップレベルに書けるのは def とグローバル変数だけです"
+                     "（言語仕様 6.3）";
             diag_fail(&d);
         }
         if (t->kind == TK_DEDENT) {
@@ -661,16 +778,29 @@ static Node *program(Parser *p) {
             UNREACHABLE();
         }
 
-        cur->next = stmt(p);
-        cur = cur->next;
-    }
+        if (tok_is_kw(t, "def")) {
+            cur->next = func_def(p);
+            cur = cur->next;
+            continue;
+        }
 
-    if (!head.next) {
+        // グローバル変数 ::= IDENT ":" type "=" expr NEWLINE
+        if (t->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) {
+            cur->next = var_decl(p);
+            cur = cur->next;
+            expect_newline(p);
+            continue;
+        }
+
+        // それ以外はトップレベルに書けない
         Diag d = {0};
-        d.message = "空のプログラムです";
-        d.primary.tok = first;
-        d.primary.label = "文が 1 つも見つかりません";
-        d.hint = "式や変数宣言を 1 行以上書いてください（例: 1 + 2）";
+        d.message = "トップレベルに実行文は書けません";
+        d.primary.tok = t;
+        d.primary.label = "ここに書けるのは def とグローバル変数だけです";
+        d.hint = "処理は main の中に書いてください:\n"
+                 "             def main() -> int:\n"
+                 "                 ...\n"
+                 "                 return 0";
         diag_fail(&d);
     }
 

@@ -1,6 +1,6 @@
 // types.h — 型の表現
 //
-// 第6章の範囲：int と bool。
+// 第8章の範囲：int / bool / None。
 // str / float は第9章、list / class は第10章・第12章で足します。
 //
 // 型付け規則の全体像は docs/spec/type-system.md にあります。
@@ -12,6 +12,7 @@
 typedef enum {
     TY_INT,   // int  → i64
     TY_BOOL,  // bool → i1（メモリ上は i8。規約 R5）
+    TY_NONE,  // None → void（値を返さない。メモリ上の表現は無い）
     // ── 以降の章で追加していく ──
     // TY_FLOAT, TY_STR, TY_NONE,   // 第9章
     // TY_LIST,   // 第10章
@@ -38,6 +39,7 @@ struct Type {
 //   型の比較は必ず type_equal() を通します（== で直接比べない）。
 extern Type *ty_int;
 extern Type *ty_bool;
+extern Type *ty_none;
 
 // プリミティブ型のシングルトンを作る。main の最初に 1 回だけ呼ぶ。
 void types_init(void);

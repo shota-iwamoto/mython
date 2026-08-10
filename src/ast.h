@@ -37,8 +37,14 @@ typedef enum {
     ND_PRINT,     // print(e) → lhs
                   // ⚠️ 暫定。第8章で本物の関数呼び出しに置き換わります。
 
-    // ── 第8章以降で追加していく ──
-    // ND_CALL, ND_RETURN, ND_FUNC, ...
+    // ── 第8章：関数 ──
+    ND_FUNC,    // 関数定義 → name, params, type_name（戻り型）, body
+    ND_PARAM,   // 仮引数   → name, type_name
+    ND_CALL,    // 呼び出し → name, args
+    ND_RETURN,  // return   → lhs（値なしなら NULL）
+
+    // ── 第9章以降で追加していく ──
+    // ND_STR, ND_INDEX, ND_FIELD, ND_CLASS, ...
 } NodeKind;
 
 // 演算子の種類。
@@ -122,6 +128,10 @@ struct Node {
     //   そこで sema が衝突しない名前を割り当てます（名前修飾の入口）。
     char *ir_name;
 
+    // このノードがグローバル変数か（第8章）。
+    // グローバルは alloca せず、@g.x を直接読み書きします。
+    bool is_global;
+
     // 型注釈に書かれた名前（ND_VARDECL）。
     // 「int」のような文字列で、sema が Type * に解決します。
     //
@@ -139,6 +149,10 @@ struct Node {
     // ND_BLOCK の中身（先頭の文）。以降は next でたどります。
     // ND_IF の then 節、ND_WHILE の本体もここです。
     Node *body;
+
+    // ND_FUNC の仮引数リスト / ND_CALL の実引数リスト（next で連結）。第8章
+    Node *params;
+    Node *args;
 
     // ND_IF の else 節（第7章）。
     // elif は「else の中の if」に脱糖するので、ND_BLOCK か ND_IF が入ります。

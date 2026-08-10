@@ -1,3 +1,4 @@
 # OUTPUT: 42
-print(42)
-0
+def main() -> int:
+    print(42)
+    return 0
