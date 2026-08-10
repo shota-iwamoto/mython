@@ -13,6 +13,8 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "sema.h"
+#include "types.h"
 #include "util.h"
 
 static void usage(int status) {
@@ -97,6 +99,9 @@ static char *ll_path_for(const char *output) {
 int main(int argc, char **argv) {
     Options opt = parse_args(argc, argv);
 
+    // プリミティブ型のシングルトンを用意する（types.h 参照）
+    types_init();
+
     // ── ソースを読む ──
     char *src = read_file(opt.input);
 
@@ -110,12 +115,14 @@ int main(int argc, char **argv) {
     // ── ② 構文解析 ──
     Node *ast = parse(toks);
     if (opt.stage == STAGE_DUMP_AST) {
+        // ⚠️ --dump-ast は sema の前に出します。
+        //    構文解析だけを独立して確認したいためです（型エラーがあっても木は見たい）。
         dump_ast(ast);
         return 0;
     }
 
     // ── ③ 意味解析・型検査 ──
-    // 第5章で sema(ast) がここに入ります。
+    sema(ast);
 
     // ── ④ コード生成 ──
     char *ir = codegen(ast, opt.input);

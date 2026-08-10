@@ -23,6 +23,12 @@ Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs) {
     return n;
 }
 
+Node *new_var_node(Token *tok, char *name) {
+    Node *n = new_node(ND_VAR, tok);
+    n->name = name;
+    return n;
+}
+
 Node *new_unary_node(Token *tok, OpKind op, Node *operand) {
     Node *n = new_node(ND_UNARY, tok);
     n->op = op;
@@ -76,6 +82,22 @@ static void dump(Node *n, int depth) {
         case ND_UNARY:
             printf("(unary %s\n", op_symbol(n->op));
             dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_VAR:
+            printf("(var %s)\n", n->name);
+            break;
+        case ND_VARDECL:
+            printf("(vardecl %s %s\n", n->name, n->type_name);
+            dump(n->rhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_ASSIGN:
+            printf("(assign\n");
+            dump(n->lhs, depth + 1);
+            dump(n->rhs, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;

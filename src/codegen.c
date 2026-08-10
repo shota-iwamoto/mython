@@ -35,6 +35,28 @@ static char *new_tmp(Emitter *e) {
     return buf;
 }
 
+// Mython の型に対応する LLVM の型名。
+// 第6章で bool（値は i1 / メモリは i8）が入ると分岐が増えます。
+static const char *llvm_type(Type *t) {
+    switch (t->kind) {
+        case TY_INT: return "i64";
+        default: UNREACHABLE();
+    }
+}
+
+// 変数の「箱」の名前（alloca したポインタ）。
+//
+// ⚠️ シャドーイングを禁止している（言語仕様 5.1）ので、
+//    変数名がそのまま一意な IR 名になります。
+//    第7章でブロックスコープが入り、第8章で関数が入っても、
+//    同名の変数が同時に存在しないため衝突しません。
+static char *var_ptr(const char *name) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "%%%s", name);
+    return sb_str(&sb);
+}
+
 // 二項演算子に対応する LLVM 命令の名前を返す。
 //
 // ⚠️ int は符号付きなので、必ず 's' の付く命令を使います。
@@ -53,16 +75,11 @@ static const char *llvm_binop(Node *n) {
         case OP_SHL: return "shl";
         case OP_SHR: return "ashr";  // 算術シフト（符号を保つ）
 
-        case OP_TRUEDIV:
-            // 言語仕様 4.2：'/' は float 専用。int には '//' を使わせる。
-            //
-            // 第5章で型検査器 (sema.c) を作ったら、この検査はそちらに移します。
-            // 今はまだ型検査パスが無いので、コード生成の時点で弾いています。
-            error_at_hint(n->tok,
-                          "切り捨て除算の '//' を使ってください"
-                          "（Mython には暗黙の型変換がないため、'/' は float 専用です）",
-                          "整数の除算に '/' は使えません");
-
+        // OP_TRUEDIV はここに来ません。
+        // ★ 第2章ではこの関数で弾いていましたが、第5章で意味解析パスを
+        //   作ったので、本来の担当である sema.c へ移しました。
+        //   コード生成器は「検査済みの正しい AST」だけを受け取る、
+        //   という役割分担がここで確立します。
         default:
             UNREACHABLE();
     }
@@ -89,28 +106,21 @@ static char *gen_expr(Emitter *e, Node *n) {
         }
 
         case ND_BINOP: {
-            // 0 除算のうち、右辺がリテラル 0 の場合はコンパイル時に弾く。
-            //
-            // ⚠️ 既知の制限：右辺が式（例 1 // (2 - 2)）の場合は検出できず、
-            //    実行時に SIGFPE でクラッシュします。実行時チェックには
-            //    分岐とエラー報告の仕組みが必要なので、第9章で対応します。
-            if ((n->op == OP_FLOORDIV || n->op == OP_MOD) &&
-                n->rhs->kind == ND_INT && n->rhs->ival == 0) {
-                Diag d = {0};
-                d.message = "0 で除算しています";
-                d.primary.tok = n->rhs->tok;
-                d.primary.label = "この 0 で割ろうとしています";
-                d.related.tok = n->tok;
-                d.related.label = diag_fmt("演算子 '%s' はここです", op_symbol(n->op));
-                diag_fail(&d);
-            }
-
             // ★ 左辺 → 右辺の順に生成する（仕様 4.5：評価順は左から右）
             const char *inst = llvm_binop(n);
             char *l = gen_expr(e, n->lhs);
             char *r = gen_expr(e, n->rhs);
             char *t = new_tmp(e);
-            sb_printf(&e->body, "  %s = %s i64 %s, %s\n", t, inst, l, r);
+            sb_printf(&e->body, "  %s = %s %s %s, %s\n", t, inst, llvm_type(n->type), l,
+                      r);
+            return t;
+        }
+
+        case ND_VAR: {
+            // 変数の読み出し（規約 R2）
+            char *t = new_tmp(e);
+            sb_printf(&e->body, "  %s = load %s, ptr %s\n", t, llvm_type(n->type),
+                      var_ptr(n->name));
             return t;
         }
 
@@ -133,21 +143,59 @@ static char *gen_expr(Emitter *e, Node *n) {
             return t;
         }
 
-        case ND_BLOCK: {
-            // 文を順に評価し、最後の値を返す（第4章の暫定仕様）。
-            //
-            // ⚠️ 現時点では式に副作用がないので、最後以外の計算結果は
-            //    使われません。-O2 を掛けると消えます（3.10 節で確認）。
-            //    第5章で代入が入ると、順に実行する意味が出てきます。
-            char *last = NULL;
-            for (Node *s = n->body; s; s = s->next) last = gen_expr(e, s);
-            if (!last) UNREACHABLE();  // 空ブロックは parser が弾いている
-            return last;
-        }
-
         default:
             UNREACHABLE();
     }
+}
+
+// ── 文の生成 ────────────────────────────────────────────────
+//
+// 文は「値を返さない」ので、gen_expr とは別の関数にします。
+// ただし式文だけは値を持つので、その値を返します
+// （プログラムの値＝最後の式文の値、という暫定仕様のため）。
+static char *gen_stmt(Emitter *e, Node *n) {
+    switch (n->kind) {
+        case ND_VARDECL: {
+            // alloca は entry ブロックに出済み（規約 R1）。ここでは store だけ。
+            char *val = gen_expr(e, n->rhs);
+            sb_printf(&e->body, "  store %s %s, ptr %s\n", llvm_type(n->type), val,
+                      var_ptr(n->name));
+            return NULL;
+        }
+
+        case ND_ASSIGN: {
+            char *val = gen_expr(e, n->rhs);
+            sb_printf(&e->body, "  store %s %s, ptr %s\n", llvm_type(n->type), val,
+                      var_ptr(n->lhs->name));
+            return NULL;
+        }
+
+        default:
+            return gen_expr(e, n);  // 式文
+    }
+}
+
+// ── alloca の収集（規約 R1）────────────────────────────────
+//
+// ★ すべてのローカル変数は entry ブロックで alloca します。
+//
+//   関数本体の途中に alloca を書いても動きますが、ループの中にあると
+//   反復のたびにスタックを消費します。entry にまとめるのが LLVM の作法で、
+//   mem2reg が最適化しやすい形でもあります。
+//
+//   本体を生成する「前」に AST を歩いて、宣言されている変数を全部集めます。
+//   第7章で if / while のブロックが入っても、再帰で辿れば同じように動きます。
+static void collect_allocas(Emitter *e, Node *n) {
+    if (!n) return;
+
+    if (n->kind == ND_VARDECL)
+        sb_printf(&e->body, "  %s = alloca %s\n", var_ptr(n->name),
+                  llvm_type(n->type));
+
+    // 子と兄弟をたどる
+    collect_allocas(e, n->lhs);
+    collect_allocas(e, n->rhs);
+    for (Node *s = n->body; s; s = s->next) collect_allocas(e, s);
 }
 
 // ── 関数の生成 ──────────────────────────────────────────────
@@ -162,9 +210,18 @@ static void gen_mython_main(Emitter *e, Node *ast) {
     sb_printf(&e->body, "define i64 @mython_main() {\n");
     sb_printf(&e->body, "entry:\n");
 
-    char *val = gen_expr(e, ast);
-    sb_printf(&e->body, "  ret i64 %s\n", val);
+    // ① まず全変数の alloca を entry ブロックに出す（規約 R1）
+    collect_allocas(e, ast);
 
+    // ② 本体：文を順に生成し、最後の式文の値を返す
+    char *last = NULL;
+    for (Node *s = ast->body; s; s = s->next) {
+        char *v = gen_stmt(e, s);
+        if (v) last = v;
+    }
+    if (!last) UNREACHABLE();  // sema が「最後は式」を保証している
+
+    sb_printf(&e->body, "  ret i64 %s\n", last);
     sb_printf(&e->body, "}\n");
 }
 

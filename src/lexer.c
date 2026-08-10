@@ -70,7 +70,34 @@ static Token *tv_push(Lexer *lx, TokenKind kind, const char *loc, int len) {
     t->loc = loc;
     t->len = len;
     t->ival = 0;
+    t->text = NULL;
     return t;
+}
+
+// ── キーワード ──────────────────────────────────────────────
+//
+// 言語仕様 2.5 の予約語。**現時点で使わないものも予約しておきます。**
+//
+// 🤔 なぜ未使用の語まで予約するのか
+//   今 `class` を変数名に使えるようにしてしまうと、第12章で class 構文を
+//   入れたときに既存のコードが壊れます。最初から予約しておけば、
+//   後方互換を壊さずに機能を追加できます。
+static const char *KEYWORDS[] = {
+    // 言語仕様 v1 で使う語
+    "and", "as", "break", "class", "continue", "def", "elif", "else",
+    "extern", "False", "for", "if", "import", "in", "is", "None",
+    "not", "or", "pass", "return", "True", "while",
+    // 将来のために予約（使うとエラーになる）
+    "assert", "const", "del", "except", "finally", "from", "global", "lambda",
+    "match", "nonlocal", "raise", "try", "with", "yield",
+    NULL,
+};
+
+static bool is_keyword(const char *s, int len) {
+    for (int i = 0; KEYWORDS[i]; i++)
+        if ((int)strlen(KEYWORDS[i]) == len && memcmp(KEYWORDS[i], s, (size_t)len) == 0)
+            return true;
+    return false;
 }
 
 // ── 文字の判定 ──────────────────────────────────────────────
@@ -272,16 +299,41 @@ static void emit_indent_tokens(Lexer *lx, int width) {
     // width == top なら何も出さない（同じブロックの続き）
 }
 
+// ── 識別子・キーワードの読み取り ────────────────────────────
+
+static int is_ident_start(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+static int is_ident_cont(char c) { return is_ident_start(c) || is_digit(c); }
+
+static void read_ident(Lexer *lx) {
+    const char *start = lx->p;
+    while (is_ident_cont(*lx->p)) lx->p++;
+    int len = (int)(lx->p - start);
+
+    TokenKind kind = is_keyword(start, len) ? TK_KEYWORD : TK_IDENT;
+    Token *t = tv_push(lx, kind, start, len);
+
+    // 名前は何度も比較するので、NUL 終端した複製を持たせる。
+    // （記号と違い、strcmp で比較できるほうが圧倒的に扱いやすい）
+    t->text = xstrndup(start, (size_t)len);
+}
+
 // ── 記号の読み取り ──────────────────────────────────────────
 
 // ★ 長い記号を先に並べること。
 //    上から順に試すので、"//" より先に "/" を書くと
 //    "//" が "/" 2 個に読まれてしまいます（最長一致の原則）。
+//
+// ⚠️ 第5章で複合代入を足すときも同じ原則が効きます。
+//    "//=" は "//" より先、"+=" は "+" より先に置かなければなりません。
 static const char *PUNCTS[] = {
+    // 3 文字
+    "//=",
     // 2 文字
-    "//", "**", "<<", ">>",
+    "//", "**", "<<", ">>", "+=", "-=", "*=", "%=",
     // 1 文字
-    "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")",
+    "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")", ":", "=",
     NULL,
 };
 
@@ -388,6 +440,15 @@ TokenVec tokenize(const char *file, const char *src) {
             continue;
         }
 
+        // 識別子・キーワード
+        //
+        // ⚠️ 数値より後に判定すること。先にすると 123 の 1 文字目で
+        //    識別子の判定に失敗するだけですが、順序を意識する習慣をつけます。
+        if (is_ident_start(*lx.p)) {
+            read_ident(&lx);
+            continue;
+        }
+
         // 記号
         if (read_punct(&lx)) continue;
 
@@ -453,6 +514,8 @@ const char *token_kind_name(TokenKind kind) {
         case TK_EOF: return "EOF";
         case TK_INT: return "INT";
         case TK_PUNCT: return "PUNCT";
+        case TK_IDENT: return "IDENT";
+        case TK_KEYWORD: return "KEYWORD";
         case TK_NEWLINE: return "NEWLINE";
         case TK_INDENT: return "INDENT";
         case TK_DEDENT: return "DEDENT";
@@ -464,6 +527,10 @@ bool tok_is(Token *tok, const char *op) {
     size_t len = strlen(op);
     return tok->kind == TK_PUNCT && (size_t)tok->len == len &&
            memcmp(tok->loc, op, len) == 0;
+}
+
+bool tok_is_kw(Token *tok, const char *kw) {
+    return tok->kind == TK_KEYWORD && strcmp(tok->text, kw) == 0;
 }
 
 void dump_tokens(TokenVec toks) {

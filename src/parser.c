@@ -15,18 +15,17 @@ typedef struct {
 // 現在のトークンを覗く（消費しない）
 static Token *peek(Parser *p) { return &p->toks.data[p->pos]; }
 
-// 【第5章で追加する予定】n 個先のトークンを覗く関数。
-// トークンをリンクリストではなく配列で持っているので O(1) で書けます。
+// n 個先のトークンを覗く（消費しない）。
 //
-//     static Token *peek_at(Parser *p, int n) {
-//         int i = p->pos + n;
-//         if (i >= p->toks.len) i = p->toks.len - 1;  // EOF より先は EOF
-//         return &p->toks.data[i];
-//     }
-//
-// 「x : int = 1（変数宣言）」と「x = 1（代入）」はどちらも IDENT で始まるため、
-// 2 個先まで見て区別する必要があります。今は使わないので、
-// -Wall の未使用警告を出さないためコメントにしてあります。
+// ★ 第1章でトークンを「配列」にした理由がここで回収されます。
+//   「x : int = 1（変数宣言）」と「x = 1（代入）」はどちらも IDENT で始まるため、
+//   2 個目のトークンを見ないと区別できません。
+//   配列なら O(1)、リンクリストなら辿る必要があります。
+static Token *peek_at(Parser *p, int n) {
+    int i = p->pos + n;
+    if (i >= p->toks.len) i = p->toks.len - 1;  // EOF より先は EOF を返す
+    return &p->toks.data[i];
+}
 
 // 現在のトークンを消費して返す（1 つ進む）
 static Token *advance(Parser *p) {
@@ -123,15 +122,24 @@ static Node *primary(Parser *p) {
         advance(p);
         return new_int_node(t, t->ival);
     }
+    if (t->kind == TK_IDENT) {
+        advance(p);
+        return new_var_node(t, t->text);
+    }
+
+    // 予約語が式の位置に来た場合は、専用の説明を出す。
+    // 「式が必要です」だけだと、なぜ変数名として使えないのか分かりません。
+    if (t->kind == TK_KEYWORD)
+        error_at_hint(t, "予約語は変数名として使えません（言語仕様 2.5）",
+                      "'%s' は予約語です", t->text);
 
     // 「何が来るべきだったか」を具体的に伝える。
-    // 「式が必要です」だけでは、何を書けばよいのか初学者には分かりません。
     Diag d = {0};
     d.message = "式が必要です";
     d.primary.tok = t;
     d.primary.label = t->kind == TK_EOF ? "ここでファイルが終わっています"
                                         : "ここには式が来るはずです";
-    d.hint = "式とは整数リテラル、または '(' で囲んだ式のことです";
+    d.hint = "式とは整数リテラル、変数名、または '(' で囲んだ式のことです";
     diag_fail(&d);
 }
 
@@ -253,25 +261,116 @@ static Node *bitor_expr(Parser *p) {
 // 第6章で、この上に or_expr / and_expr / not_expr / comparison が積まれます。
 static Node *expr(Parser *p) { return bitor_expr(p); }
 
-// stmt ::= expr NEWLINE
-//
-// 第5章で、ここに変数宣言・代入が加わります。
-// 第7章で if / while、第8章で return が加わります。
-static Node *stmt(Parser *p) {
-    Node *e = expr(p);
-
-    // 式の後は改行でなければならない
+// 論理行の終わり（NEWLINE）を要求する
+static void expect_newline(Parser *p) {
     Token *t = peek(p);
     if (t->kind != TK_NEWLINE) {
         Diag d = {0};
-        d.message = "式の後に余分なトークンがあります";
+        d.message = "文の後に余分なトークンがあります";
         d.primary.tok = t;
         d.primary.label = "ここから先が解釈できません";
-        d.hint = "1 行に書けるのは 1 つの式です（改行で区切ってください）";
+        d.hint = "1 行に書けるのは 1 つの文です（改行で区切ってください）";
         diag_fail(&d);
     }
-    advance(p);  // NEWLINE を消費
-    return e;
+    advance(p);
+}
+
+// var_decl ::= IDENT ":" type "=" expr
+//
+// 型注釈は必須です（言語仕様 3.3）。
+static Node *var_decl(Parser *p) {
+    Token *name_tok = advance(p);  // IDENT（呼び出し元が確認済み）
+    advance(p);                    // ":"
+
+    // 型注釈。ここでは「名前を記録する」だけで、
+    // それが有効な型かどうかの判断は sema に任せます。
+    Token *ty_tok = peek(p);
+    if (ty_tok->kind != TK_IDENT)
+        error_at_hint(ty_tok, "型注釈には型名を書きます（例: x: int = 0）",
+                      "型名が必要です");
+    advance(p);
+
+    // 初期化式は必須（言語仕様 5.1：未初期化変数を作らせない）
+    if (!tok_is(peek(p), "=")) {
+        Diag d = {0};
+        d.message = "変数宣言には初期化式が必要です";
+        d.primary.tok = peek(p);
+        d.primary.label = "ここに '= 初期値' が必要です";
+        d.hint = "Mython では未初期化の変数を作れません（例: x: int = 0）";
+        diag_fail(&d);
+    }
+    advance(p);  // "="
+
+    Node *n = new_node(ND_VARDECL, name_tok);
+    n->name = name_tok->text;
+    n->type_name = ty_tok->text;
+    n->rhs = expr(p);
+    return n;
+}
+
+// 複合代入の記号なら、対応する演算子を返す。違えば -1。
+static int aug_op(Token *t) {
+    if (tok_is(t, "+=")) return OP_ADD;
+    if (tok_is(t, "-=")) return OP_SUB;
+    if (tok_is(t, "*=")) return OP_MUL;
+    if (tok_is(t, "//=")) return OP_FLOORDIV;
+    if (tok_is(t, "%=")) return OP_MOD;
+    return -1;
+}
+
+// simple_stmt ::= var_decl | assign_stmt | expr_stmt
+//
+// ★ 代入文と式文の区別のしかた（docs/spec/grammar.md 第4節）
+//
+//   左辺を先に「式」として読み、その後に '=' が続いていたら
+//   「今読んだ式は代入先だった」と解釈し直します。
+//
+//   こうすると xs[0] = 1 や p.f = 1（第10章・第12章）にも
+//   そのまま対応できます。左辺を読み切るまで代入かどうか判らないからです。
+static Node *simple_stmt(Parser *p) {
+    // IDENT の次が ':' なら変数宣言。2 トークン先読みで判別する。
+    if (peek(p)->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) return var_decl(p);
+
+    Node *lhs = expr(p);
+    Token *t = peek(p);
+
+    int aug = aug_op(t);
+    if (!tok_is(t, "=") && aug < 0) return lhs;  // 代入ではない → 式文
+
+    // ここから代入。左辺が代入先になれるか確認する。
+    if (lhs->kind != ND_VAR) {
+        Diag d = {0};
+        d.message = "この式には代入できません";
+        d.primary.tok = lhs->tok;
+        d.primary.label = "代入先にできるのは変数だけです";
+        d.hint = "添字 xs[0] やフィールド p.f への代入は第10章・第12章で対応します";
+        diag_fail(&d);
+    }
+    advance(p);  // "=" または複合代入記号
+
+    Node *rhs = expr(p);
+
+    // ★ 複合代入は脱糖する（言語仕様 5.2）
+    //     x += e  →  x = x + e
+    //
+    // ⚠️ 左辺を 2 回書くことになります。変数なら 2 回評価しても同じですが、
+    //    第10章で xs[f()] += 1 のような形を許すときは
+    //    「左辺は 1 回だけ評価」を守る書き換えが必要になります。
+    if (aug >= 0) rhs = new_binop_node(t, (OpKind)aug, new_var_node(lhs->tok, lhs->name), rhs);
+
+    Node *n = new_node(ND_ASSIGN, t);
+    n->lhs = lhs;
+    n->rhs = rhs;
+    return n;
+}
+
+// stmt ::= simple_stmt NEWLINE
+//
+// 第7章で if / while、第8章で return と def が加わります。
+static Node *stmt(Parser *p) {
+    Node *s = simple_stmt(p);
+    expect_newline(p);
+    return s;
 }
 
 // program ::= { stmt } EOF
@@ -312,8 +411,8 @@ static Node *program(Parser *p) {
         Diag d = {0};
         d.message = "空のプログラムです";
         d.primary.tok = first;
-        d.primary.label = "式が 1 つも見つかりません";
-        d.hint = "整数や式を 1 行以上書いてください（例: 1 + 2）";
+        d.primary.label = "文が 1 つも見つかりません";
+        d.hint = "式や変数宣言を 1 行以上書いてください（例: 1 + 2）";
         diag_fail(&d);
     }
 

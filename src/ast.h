@@ -10,14 +10,18 @@
 #define MYTHON_AST_H
 
 #include "lexer.h"
+#include "types.h"
 
 typedef enum {
-    ND_INT,    // 整数リテラル → ival
-    ND_BINOP,  // 二項演算   → op, lhs, rhs
-    ND_UNARY,  // 単項演算   → op, lhs
-    ND_BLOCK,  // 文のリスト → body（next で連結）
-    // ── 第5章以降で追加していく ──
-    // ND_VAR, ND_CALL, ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
+    ND_INT,      // 整数リテラル → ival
+    ND_BINOP,    // 二項演算     → op, lhs, rhs
+    ND_UNARY,    // 単項演算     → op, lhs
+    ND_VAR,      // 変数参照     → name
+    ND_VARDECL,  // 変数宣言 x: T = e → name, type_name, rhs
+    ND_ASSIGN,   // 代入 x = e   → lhs（ND_VAR）, rhs
+    ND_BLOCK,    // 文のリスト   → body（next で連結）
+    // ── 第6章以降で追加していく ──
+    // ND_CALL, ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
 } NodeKind;
 
 // 演算子の種類。
@@ -55,12 +59,28 @@ struct Node {
     //   これを最初から持たせているかで決まります。
     Token *tok;
 
-    // 型（第5章で sema が埋める。それまでは常に NULL）
-    // struct Type *type;
+    // ★ この式の型。**意味解析パス (sema.c) が埋めます。**
+    //   構文解析の直後は必ず NULL です。
+    //   codegen は sema が埋めたこの型を見て命令を選びます。
+    Type *type;
 
     // ── 値 ──
     long long ival;  // ND_INT
     OpKind op;       // ND_BINOP / ND_UNARY
+
+    // 名前。
+    //   ND_VAR / ND_VARDECL : 変数名
+    char *name;
+
+    // 型注釈に書かれた名前（ND_VARDECL）。
+    // 「int」のような文字列で、sema が Type * に解決します。
+    //
+    // 🤔 なぜ parser が Type * に解決しないのか
+    //   名前から型への解決は「意味」の話であって「構文」の話ではありません。
+    //   parser は「そこに識別子が書かれている」ことだけを記録し、
+    //   それが有効な型かどうかの判断は sema に任せます。
+    //   パスの責務を混ぜないための分離です。
+    char *type_name;
 
     // ── 子ノード ──
     // 単項演算は lhs だけを使います（rhs は NULL）。
@@ -85,6 +105,7 @@ Node *new_node(NodeKind kind, Token *tok);
 Node *new_int_node(Token *tok, long long value);
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_unary_node(Token *tok, OpKind op, Node *operand);
+Node *new_var_node(Token *tok, char *name);
 
 // AST を S 式で標準出力に表示する（--dump-ast 用）。
 // テキストとして比較できる形にしておくのが重要です。

@@ -50,7 +50,7 @@
 | [第2章](chapters/ch02-arithmetic-and-precedence.md) | 四則演算と演算子の優先順位 | ✅ 完成 |
 | [第3章](chapters/ch03-diagnostics.md) | エラー報告と診断メッセージ | ✅ 完成 |
 | [第4章](chapters/ch04-indentation.md) | インデント構文（NEWLINE / INDENT / DEDENT） | ✅ 完成 |
-| 第5章 | 変数と型検査パスの導入 | ⬜ 未着手 |
+| [第5章](chapters/ch05-variables-and-typecheck.md) | 変数と型検査パスの導入 | ✅ 完成 |
 | 第6章 | bool・比較演算・論理演算 | ⬜ 未着手 |
 | 第7章 | 制御構文（if / elif / else / while） | ⬜ 未着手 |
 | 第8章 | 関数定義と呼び出し | ⬜ 未着手 |

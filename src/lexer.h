@@ -11,9 +11,11 @@
 #include "util.h"
 
 typedef enum {
-    TK_EOF,    // 入力の終わり
-    TK_INT,    // 整数リテラル
-    TK_PUNCT,  // 記号（+ - * // ( ) など）
+    TK_EOF,      // 入力の終わり
+    TK_INT,      // 整数リテラル
+    TK_PUNCT,    // 記号（+ - * // ( ) など）
+    TK_IDENT,    // 識別子（変数名・型名）
+    TK_KEYWORD,  // 予約語（if / def / and など。言語仕様 2.5）
 
     // ── 仮想トークン（ソース上に対応する文字がない）──
     //
@@ -44,6 +46,7 @@ struct Token {
 
     // ── 値（kind によって使い分ける）──
     long long ival;  // TK_INT
+    char *text;      // TK_IDENT / TK_KEYWORD（NUL 終端した複製）
 };
 
 // トークンの可変長配列。
@@ -66,6 +69,10 @@ const char *token_kind_name(TokenKind kind);
 //   tok_is(t, "+")  →  t が記号 '+' なら true
 // 記号の文字列を Token に複製せず、ソース上の位置と長さで比較します。
 bool tok_is(Token *tok, const char *op);
+
+// トークンが指定したキーワードそのものか判定する。
+//   tok_is_kw(t, "if")  →  t がキーワード if なら true
+bool tok_is_kw(Token *tok, const char *kw);
 
 // --dump-tokens の出力
 void dump_tokens(TokenVec toks);

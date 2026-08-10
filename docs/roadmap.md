@@ -71,10 +71,12 @@ note: 対応する '(' はここです
 - 注記: `INDENT`/`DEDENT` を消費する構文（if/while）は第7章。この章は**生成側**を作り、`--dump-tokens` で検証する
 - [→ 第4章](chapters/ch04-indentation.md)
 
-### ⬜ 第5章 変数と型検査パスの導入
-- **達成目標**: `x: int = 1` / `x = x + 2` / `return x` が動く。型が合わないとコンパイルエラー
+### ✅ 第5章 変数と型検査パスの導入
+- **達成目標**: `x: int = 1` / `x = x + 2` / 最後の式文 `x` が動く。未定義の名前・未知の型名はコンパイルエラー
 - 学ぶこと: シンボルテーブル / スコープ / `alloca`・`store`・`load` / **意味解析パス（sema.c）の新設**
-- 成果物: `src/sema.c` 新規追加。AST に型を書き込む
+- 成果物: `src/types.{h,c}`・`src/sema.{h,c}` 新設、`peek_at()` による 2 トークン先読み、複合代入の脱糖、テスト 61 件
+- 注記: `/` と 0 除算の検査を codegen から sema へ移動。型が `int` 1 つしかないため「型不一致」のテストは第6章から
+- [→ 第5章](chapters/ch05-variables-and-typecheck.md)
 
 ### ⬜ 第6章 bool・比較演算・論理演算
 - **達成目標**: `x < 3 and not flag` が動く。`and`/`or` は短絡評価
