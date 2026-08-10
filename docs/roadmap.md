@@ -78,9 +78,14 @@ note: 対応する '(' はここです
 - 注記: `/` と 0 除算の検査を codegen から sema へ移動。型が `int` 1 つしかないため「型不一致」のテストは第6章から
 - [→ 第5章](chapters/ch05-variables-and-typecheck.md)
 
-### ⬜ 第6章 bool・比較演算・論理演算
-- **達成目標**: `x < 3 and not flag` が動く。`and`/`or` は短絡評価
+### ✅ 第6章 bool・比較演算・論理演算
+- **達成目標**: `x < 10 and not (x == 3)` が動く。`and`/`or` は短絡評価
 - 学ぶこと: `i1` と `i8` の使い分け / 短絡評価のための基本ブロック分岐 / 比較命令 `icmp`
+- 成果物: `ND_LOGICAL`、階層の上に 4 段（`or`/`and`/`not`/`comparison`）、
+  `emit_label`/`emit_br`/`emit_cond_br`、alloca 専用バッファ、テスト 87 件
+- 注記: **初めて制御フローを生成する章**。`mem2reg` が `alloca` を `phi` に変換することを実測。
+  第5章で未テストだった「型が一致しません」をここで回収。比較連鎖は構文エラー（Python との差異）
+- [→ 第6章](chapters/ch06-bool-and-logical-ops.md)
 
 ### ⬜ 第7章 制御構文（if / elif / else / while）
 - **達成目標**: FizzBuzz が書ける（`print` は暫定実装で可）

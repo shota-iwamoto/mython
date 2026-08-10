@@ -81,11 +81,31 @@ static Type *check_expr(Sema *s, Node *n);
 
 // 二項演算子が、その型に適用できるか
 static bool op_supports(OpKind op, Type *t) {
+    // 比較は int どうし・bool どうしのどちらでも使える。
+    // （両辺の型が等しいことは呼び出し側で検査済み）
+    // 言語仕様 4.3 / docs/spec/type-system.md 5.5
+    if (is_compare(op)) return true;
+
     if (t->kind == TY_INT) {
         // 言語仕様 4.2：int に '/' は使えない（'//' を使う）
         return op != OP_TRUEDIV;
     }
-    return false;
+    return false;  // ★ bool に算術・ビット演算は使えない
+}
+
+// 「ここには bool が必要」というエラー。
+// and の左辺・and の右辺・not の 3 か所で同じ形になるので関数にまとめます
+// （第2章の span_token、第4章の advance_newline と同じ「3 回目でまとめる」判断）。
+static Type *bool_required(Node *op_node, Node *operand, Type *actual) {
+    Diag d = {0};
+    d.message = diag_fmt("演算子 '%s' には bool が必要です", op_symbol(op_node->op));
+    d.primary.tok = operand->tok;
+    d.primary.label = diag_fmt("これは '%s' 型です", type_name(actual));
+    d.related.tok = op_node->tok;
+    d.related.label = diag_fmt("演算子 '%s' はここです", op_symbol(op_node->op));
+    d.hint = "Mython は int を真偽値として扱いません（言語仕様 4.4）。"
+             "比較を書いてください（例: x != 0）";
+    diag_fail(&d);
 }
 
 static Type *check_binop(Sema *s, Node *n) {
@@ -132,11 +152,35 @@ static Type *check_binop(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    return l;  // 算術演算は両辺と同じ型を返す
+    // ★ 比較は bool を返す。算術は両辺と同じ型を返す。
+    return is_compare(n->op) ? ty_bool : l;
+}
+
+// and / or は両辺が bool のみ（言語仕様 4.4）。
+// Python と違い int を真偽値として扱いません（truthiness を採用しない）。
+//
+// 🤔 なぜ「最後に評価した値」を返さないのか
+//   1 and "hello" のような式の型が一意に決まらなくなるからです。
+//   bool に固定すれば and / or の型は常に bool です。
+static Type *check_logical(Sema *s, Node *n) {
+    Type *l = check_expr(s, n->lhs);
+    Type *r = check_expr(s, n->rhs);
+
+    if (l->kind != TY_BOOL) return bool_required(n, n->lhs, l);
+    if (r->kind != TY_BOOL) return bool_required(n, n->rhs, r);
+    return ty_bool;
 }
 
 static Type *check_unary(Sema *s, Node *n) {
     Type *t = check_expr(s, n->lhs);
+
+    // not は bool を取り bool を返す（言語仕様 4.4）
+    if (n->op == OP_NOT) {
+        if (t->kind != TY_BOOL) return bool_required(n, n->lhs, t);
+        return ty_bool;
+    }
+
+    // - + ~ は int のみ
     if (t->kind != TY_INT)
         error_at(n->tok, "型 '%s' に単項演算子 '%s' は適用できません", type_name(t),
                  op_symbol(n->op));
@@ -160,8 +204,10 @@ static Type *check_expr(Sema *s, Node *n) {
     Type *t;
     switch (n->kind) {
         case ND_INT: t = ty_int; break;
+        case ND_BOOL: t = ty_bool; break;
         case ND_VAR: t = check_var(s, n); break;
         case ND_BINOP: t = check_binop(s, n); break;
+        case ND_LOGICAL: t = check_logical(s, n); break;
         case ND_UNARY: t = check_unary(s, n); break;
         default: UNREACHABLE();
     }

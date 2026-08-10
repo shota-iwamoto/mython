@@ -41,6 +41,13 @@ static Token *consume(Parser *p, const char *op) {
     return NULL;
 }
 
+// 現在のトークンが指定したキーワードなら消費して返す。違えば NULL。
+// and / or / not は記号ではなくキーワードなので、consume() が使えません。
+static Token *consume_kw(Parser *p, const char *kw) {
+    if (tok_is_kw(peek(p), kw)) return advance(p);
+    return NULL;
+}
+
 // 対応する閉じ記号を要求する。無ければ「開き記号はここ」を添えてエラーにする。
 //
 //   open  … 対応する開き記号のトークン（'(' や '[' ）
@@ -89,7 +96,11 @@ static Token *expect_close(Parser *p, const char *close, Token *open) {
 //
 // なぜそうなるのかは docs/spec/grammar.md 第5節に完全なトレースがあります。
 //
-//   expr        ::= bitor_expr                       弱い ↑
+//   expr        ::= or_expr                          弱い ↑
+//   or_expr     ::= and_expr    { "or"  and_expr }
+//   and_expr    ::= not_expr    { "and" not_expr }
+//   not_expr    ::= "not" not_expr | comparison
+//   comparison  ::= bitor_expr [ compop bitor_expr ]  （連鎖不可）
 //   bitor_expr  ::= bitxor_expr { "|"  bitxor_expr }
 //   bitxor_expr ::= bitand_expr { "^"  bitand_expr }
 //   bitand_expr ::= shift_expr  { "&"  shift_expr }
@@ -98,7 +109,7 @@ static Token *expect_close(Parser *p, const char *close, Token *open) {
 //   mul_expr    ::= unary       { ("*"|"/"|"//"|"%") unary }
 //   unary       ::= ("-"|"+"|"~") unary | power
 //   power       ::= primary [ "**" unary ]           （第9章で実装）
-//   primary     ::= INT | "(" expr ")"               強い ↓
+//   primary     ::= INT | True | False | IDENT | "(" expr ")"   強い ↓
 
 static Node *expr(Parser *p);
 
@@ -125,6 +136,18 @@ static Node *primary(Parser *p) {
     if (t->kind == TK_IDENT) {
         advance(p);
         return new_var_node(t, t->text);
+    }
+
+    // True / False は予約語だが、式として使える（値を持つリテラル）。
+    // ★ 「予約語はエラー」の判定より前に置くこと。
+    //   後ろに置くと True が「'True' は予約語です」になってしまいます。
+    if (tok_is_kw(t, "True")) {
+        advance(p);
+        return new_bool_node(t, true);
+    }
+    if (tok_is_kw(t, "False")) {
+        advance(p);
+        return new_bool_node(t, false);
     }
 
     // 予約語が式の位置に来た場合は、専用の説明を出す。
@@ -256,10 +279,90 @@ static Node *bitor_expr(Parser *p) {
     }
 }
 
-// expr ::= bitor_expr
+// 比較演算子なら対応する OpKind を返す。違えば -1。
+static int compare_op(Token *t) {
+    if (tok_is(t, "==")) return OP_EQ;
+    if (tok_is(t, "!=")) return OP_NE;
+    if (tok_is(t, "<=")) return OP_LE;  // "<" より先に見る（最長一致の習慣）
+    if (tok_is(t, ">=")) return OP_GE;
+    if (tok_is(t, "<")) return OP_LT;
+    if (tok_is(t, ">")) return OP_GT;
+    return -1;
+}
+
+// comparison ::= bitor_expr [ compop bitor_expr ]
 //
-// 第6章で、この上に or_expr / and_expr / not_expr / comparison が積まれます。
-static Node *expr(Parser *p) { return bitor_expr(p); }
+// ⚠️ 連鎖しません（言語仕様 4.1）。while ではなく if で書くのがポイントです。
+static Node *comparison(Parser *p) {
+    Node *lhs = bitor_expr(p);
+
+    Token *t = peek(p);
+    int op = compare_op(t);
+    if (op < 0) return lhs;  // 比較演算子がない
+    advance(p);
+
+    Node *rhs = bitor_expr(p);
+
+    // ★ 比較の連鎖を禁止する。
+    //   放っておいても (1 < 2) < 3 で「bool と int の比較」の型エラーには
+    //   なりますが、なぜ bool が出てくるのか利用者には分かりません。
+    //   構文の段階で捕まえて、直し方を示します。
+    Token *t2 = peek(p);
+    if (compare_op(t2) >= 0) {
+        Diag d = {0};
+        d.message = "比較演算子を連鎖させることはできません";
+        d.primary.tok = t2;
+        d.primary.label = "2 つ目の比較演算子です";
+        d.related.tok = t;
+        d.related.label = "1 つ目の比較演算子はここです";
+        d.hint = "Python と違い連鎖比較は使えません。'and' で繋いでください"
+                 "（例: a < b and b < c）";
+        diag_fail(&d);
+    }
+
+    return new_binop_node(t, (OpKind)op, lhs, rhs);
+}
+
+// not_expr ::= "not" not_expr | comparison
+//
+// ★ 右結合：自分自身を再帰で呼ぶ（第2章の unary と同じ形）。
+static Node *not_expr(Parser *p) {
+    Token *t = peek(p);
+    if (consume_kw(p, "not")) return new_unary_node(t, OP_NOT, not_expr(p));
+    return comparison(p);
+}
+
+// and_expr ::= not_expr { "and" not_expr }
+//
+// ★ 左結合：while ループで lhs を上書きする（第2章の add_expr と同じ形）。
+static Node *and_expr(Parser *p) {
+    Node *lhs = not_expr(p);
+    for (;;) {
+        Token *t = peek(p);
+        if (consume_kw(p, "and"))
+            lhs = new_logical_node(t, OP_AND, lhs, not_expr(p));
+        else
+            return lhs;
+    }
+}
+
+// or_expr ::= and_expr { "or" and_expr }
+static Node *or_expr(Parser *p) {
+    Node *lhs = and_expr(p);
+    for (;;) {
+        Token *t = peek(p);
+        if (consume_kw(p, "or"))
+            lhs = new_logical_node(t, OP_OR, lhs, and_expr(p));
+        else
+            return lhs;
+    }
+}
+
+// expr ::= or_expr
+//
+// ★ 第2章で作った bitor_expr 以下の階層は無変更です。
+//   この関数の 1 行を書き換えて、上に 4 段積んだだけ。
+static Node *expr(Parser *p) { return or_expr(p); }
 
 // 論理行の終わり（NEWLINE）を要求する
 static void expect_newline(Parser *p) {

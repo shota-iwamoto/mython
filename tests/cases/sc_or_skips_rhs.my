@@ -1,0 +1,3 @@
+# EXIT: 1
+z: int = 0
+True or (1 // z) > 0

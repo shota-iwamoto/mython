@@ -1,7 +1,7 @@
 // types.h — 型の表現
 //
-// 第5章の範囲：int のみ。
-// bool は第6章、str / float は第9章、list / class は第10章・第12章で足します。
+// 第6章の範囲：int と bool。
+// str / float は第9章、list / class は第10章・第12章で足します。
 //
 // 型付け規則の全体像は docs/spec/type-system.md にあります。
 #ifndef MYTHON_TYPES_H
@@ -10,9 +10,9 @@
 #include <stdbool.h>
 
 typedef enum {
-    TY_INT,  // int → i64
+    TY_INT,   // int  → i64
+    TY_BOOL,  // bool → i1（メモリ上は i8。規約 R5）
     // ── 以降の章で追加していく ──
-    // TY_BOOL,   // 第6章
     // TY_FLOAT, TY_STR, TY_NONE,   // 第9章
     // TY_LIST,   // 第10章
     // TY_CLASS,  // 第12章
@@ -37,6 +37,7 @@ struct Type {
 //   ただし将来 list[int] のような複合型が入るので、
 //   型の比較は必ず type_equal() を通します（== で直接比べない）。
 extern Type *ty_int;
+extern Type *ty_bool;
 
 // プリミティブ型のシングルトンを作る。main の最初に 1 回だけ呼ぶ。
 void types_init(void);
@@ -53,7 +54,7 @@ const char *type_name(Type *t);
 Type *type_from_name(const char *name);
 
 // 型注釈に書ける名前の一覧（エラーメッセージのヒスト用）。
-// 例: "int"
+// 例: "int, bool"
 const char *type_name_list(void);
 
 #endif  // MYTHON_TYPES_H

@@ -1,0 +1,3 @@
+# ERROR: 演算子 'not' には bool が必要です
+# ERROR: これは 'int' 型です
+not 1

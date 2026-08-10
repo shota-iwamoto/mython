@@ -1,0 +1,3 @@
+# EXIT: 1
+# not は右結合（自己再帰）なので重ねられる
+not not True

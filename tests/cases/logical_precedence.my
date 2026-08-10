@@ -1,0 +1,3 @@
+# EXIT: 1
+# or は and より弱い：True or (False and False)
+True or False and False

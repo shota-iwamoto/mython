@@ -15,8 +15,23 @@ Node *new_int_node(Token *tok, long long value) {
     return n;
 }
 
+Node *new_bool_node(Token *tok, bool value) {
+    Node *n = new_node(ND_BOOL, tok);
+    n->ival = value ? 1 : 0;
+    return n;
+}
+
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs) {
     Node *n = new_node(ND_BINOP, tok);
+    n->op = op;
+    n->lhs = lhs;
+    n->rhs = rhs;
+    return n;
+}
+
+// and / or 専用。形は二項演算と同じだが、コード生成が違うので種別を分ける。
+Node *new_logical_node(Token *tok, OpKind op, Node *lhs, Node *rhs) {
+    Node *n = new_node(ND_LOGICAL, tok);
     n->op = op;
     n->lhs = lhs;
     n->rhs = rhs;
@@ -49,9 +64,18 @@ const char *op_symbol(OpKind op) {
         case OP_BITXOR: return "^";
         case OP_SHL: return "<<";
         case OP_SHR: return ">>";
+        case OP_EQ: return "==";
+        case OP_NE: return "!=";
+        case OP_LT: return "<";
+        case OP_LE: return "<=";
+        case OP_GT: return ">";
+        case OP_GE: return ">=";
+        case OP_AND: return "and";
+        case OP_OR: return "or";
         case OP_NEG: return "-";
         case OP_POS: return "+";
         case OP_BITNOT: return "~";
+        case OP_NOT: return "not";
         default: UNREACHABLE();
     }
 }
@@ -71,6 +95,16 @@ static void dump(Node *n, int depth) {
     switch (n->kind) {
         case ND_INT:
             printf("(int %lld)\n", n->ival);
+            break;
+        case ND_BOOL:
+            printf("(bool %s)\n", n->ival ? "True" : "False");
+            break;
+        case ND_LOGICAL:
+            printf("(logical %s\n", op_symbol(n->op));
+            dump(n->lhs, depth + 1);
+            dump(n->rhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
             break;
         case ND_BINOP:
             printf("(binop %s\n", op_symbol(n->op));

@@ -1,0 +1,4 @@
+# ERROR: 型が一致しません
+# ERROR: 型 'int' の式
+flag: bool = True
+flag = 1

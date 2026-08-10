@@ -1,6 +1,6 @@
 // ast.h — 抽象構文木（AST）のノード定義
 //
-// 第1章の範囲：整数リテラルノードのみ。
+// 第6章の範囲：リテラル・二項/単項演算・比較・論理演算・変数・代入・ブロック。
 //
 // 設計方針：全ノード種別を 1 つの構造体 Node で表します。
 // 美しくはありませんが、C で共用体を安全に扱うより読みやすく、
@@ -9,18 +9,25 @@
 #ifndef MYTHON_AST_H
 #define MYTHON_AST_H
 
+#include <stdbool.h>
+
 #include "lexer.h"
 #include "types.h"
 
 typedef enum {
     ND_INT,      // 整数リテラル → ival
-    ND_BINOP,    // 二項演算     → op, lhs, rhs
-    ND_UNARY,    // 単項演算     → op, lhs
+    ND_BOOL,     // 真偽値リテラル True / False → ival（0 / 1）
+    ND_BINOP,    // 二項演算（比較を含む）→ op, lhs, rhs
+    ND_LOGICAL,  // and / or     → op, lhs, rhs
+                 // ★ 見た目は二項演算だが「右辺を評価しないことがある」ため
+                 //   コード生成がまったく違う。だからノード種別を分ける。
+                 //   ノード種別は「構文の形」ではなく「生成のしかた」で分ける。
+    ND_UNARY,    // 単項演算（not を含む）→ op, lhs
     ND_VAR,      // 変数参照     → name
     ND_VARDECL,  // 変数宣言 x: T = e → name, type_name, rhs
     ND_ASSIGN,   // 代入 x = e   → lhs（ND_VAR）, rhs
     ND_BLOCK,    // 文のリスト   → body（next で連結）
-    // ── 第6章以降で追加していく ──
+    // ── 第7章以降で追加していく ──
     // ND_CALL, ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
 } NodeKind;
 
@@ -40,11 +47,31 @@ typedef enum {
     OP_BITXOR,    // ^
     OP_SHL,       // <<
     OP_SHR,       // >>
+
+    // 比較（結果は bool）
+    // ⚠️ この 6 つは連続して並べること。is_compare() が範囲で判定します。
+    OP_EQ,  // ==
+    OP_NE,  // !=
+    OP_LT,  // <
+    OP_LE,  // <=
+    OP_GT,  // >
+    OP_GE,  // >=
+
+    // 論理（ND_LOGICAL。短絡評価する）
+    OP_AND,  // and
+    OP_OR,   // or
+
     // 単項
     OP_NEG,     // -x
     OP_POS,     // +x
     OP_BITNOT,  // ~x
+    OP_NOT,     // not x
 } OpKind;
+
+// 比較演算子か。
+// ★ enum の並び順に依存しています（OP_EQ 〜 OP_GE が連続していること）。
+//   switch で 6 個並べるより短く、演算子を足したときの書き忘れも起きません。
+static inline bool is_compare(OpKind op) { return OP_EQ <= op && op <= OP_GE; }
 
 // 演算子の記号（エラーメッセージと --dump-ast 用）
 const char *op_symbol(OpKind op);
@@ -103,7 +130,9 @@ struct Node {
 // コンストラクタ
 Node *new_node(NodeKind kind, Token *tok);
 Node *new_int_node(Token *tok, long long value);
+Node *new_bool_node(Token *tok, bool value);
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
+Node *new_logical_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_unary_node(Token *tok, OpKind op, Node *operand);
 Node *new_var_node(Token *tok, char *name);
 

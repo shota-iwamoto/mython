@@ -1,0 +1,4 @@
+# EXIT: 0
+flag: bool = True
+flag = False
+flag

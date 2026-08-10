@@ -1,0 +1,9 @@
+# EXIT: 1
+# 6 種類すべてが期待どおりなら True
+a: bool = 1 == 1
+b: bool = 1 != 2
+c: bool = 1 < 2
+d: bool = 2 <= 2
+e: bool = 3 > 2
+f: bool = 3 >= 3
+a and b and c and d and e and f

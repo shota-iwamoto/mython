@@ -1,0 +1,4 @@
+# EXIT: 1
+# bool の変数：メモリは i8、レジスタは i1（規約 R5）
+flag: bool = True
+flag
