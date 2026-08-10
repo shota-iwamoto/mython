@@ -17,6 +17,7 @@
 typedef enum {
     ND_INT,      // 整数リテラル → ival
     ND_BOOL,     // 真偽値リテラル True / False → ival（0 / 1）
+    ND_STR,      // 文字列リテラル → sval, slen（第9章）
     ND_BINOP,    // 二項演算（比較を含む）→ op, lhs, rhs
     ND_LOGICAL,  // and / or     → op, lhs, rhs
                  // ★ 見た目は二項演算だが「右辺を評価しないことがある」ため
@@ -63,6 +64,7 @@ typedef enum {
     OP_BITXOR,    // ^
     OP_SHL,       // <<
     OP_SHR,       // >>
+    OP_POW,       // **  （第9章。ランタイムの my_ipow を呼ぶ）
 
     // 比較（結果は bool）
     // ⚠️ この 6 つは連続して並べること。is_compare() が範囲で判定します。
@@ -108,7 +110,9 @@ struct Node {
     Type *type;
 
     // ── 値 ──
-    long long ival;  // ND_INT
+    long long ival;  // ND_INT / ND_BOOL
+    char *sval;      // ND_STR（エスケープ解決済み）
+    int slen;        // ND_STR のバイト長
     OpKind op;       // ND_BINOP / ND_UNARY
 
     // 名前。
@@ -150,6 +154,10 @@ struct Node {
     // ND_IF の then 節、ND_WHILE の本体もここです。
     Node *body;
 
+    // ND_CALL が組み込み関数のとき、sema が選んだ候補（第9章）。
+    // ユーザー定義関数の呼び出しなら NULL。
+    const struct Builtin_ *builtin;
+
     // ND_FUNC の仮引数リスト / ND_CALL の実引数リスト（next で連結）。第8章
     Node *params;
     Node *args;
@@ -173,6 +181,7 @@ struct Node {
 Node *new_node(NodeKind kind, Token *tok);
 Node *new_int_node(Token *tok, long long value);
 Node *new_bool_node(Token *tok, bool value);
+Node *new_str_node(Token *tok, char *bytes, int len);
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_logical_node(Token *tok, OpKind op, Node *lhs, Node *rhs);
 Node *new_unary_node(Token *tok, OpKind op, Node *operand);

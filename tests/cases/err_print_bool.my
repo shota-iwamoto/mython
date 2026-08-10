@@ -1,5 +1,0 @@
-# ERROR: print はまだ 'bool' 型を出力できません
-# ERROR: = ヒント: print は今のところ int 専用です
-def main() -> int:
-    print(True)
-    return 0

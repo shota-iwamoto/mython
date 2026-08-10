@@ -93,6 +93,7 @@ static const char *tok_kind_ja(TokenKind kind) {
         case TK_PUNCT: return "記号";
         case TK_IDENT: return "名前";
         case TK_KEYWORD: return "予約語";
+        case TK_STR: return "文字列";
         case TK_NEWLINE: return "改行";
         case TK_INDENT: return "字下げ";
         case TK_DEDENT: return "字下げの終わり";
@@ -139,6 +140,7 @@ static Token *expect(Parser *p, TokenKind kind, const char *what,
 //   primary     ::= INT | True | False | IDENT | "(" expr ")"   強い ↓
 
 static Node *expr(Parser *p);
+static Node *unary(Parser *p);
 static Token *type_name_token(Parser *p, const char *what);
 
 // primary ::= INT | "(" expr ")"
@@ -164,6 +166,10 @@ static Node *primary(Parser *p) {
     if (t->kind == TK_IDENT) {
         advance(p);
         return new_var_node(t, t->text);
+    }
+    if (t->kind == TK_STR) {
+        advance(p);
+        return new_str_node(t, t->text, t->slen);
     }
 
     // True / False は予約語だが、式として使える（値を持つリテラル）。
@@ -253,11 +259,10 @@ static Node *postfix(Parser *p) {
 static Node *power(Parser *p) {
     Node *base = postfix(p);  // ★ 第8章：primary から postfix に差し替え
 
+    // ★ 第2章に「第9章ではこうなります」と書いておいたとおりの形。
+    //   右結合なので、右辺は unary() を再帰で呼びます（2 ** 3 ** 2 = 2 ** 9）。
     Token *t = peek(p);
-    if (tok_is(t, "**"))
-        error_at_hint(t, "第9章で実装します（負の指数を実行時エラーにするため、"
-                         "エラー報告のランタイムが必要です）",
-                      "演算子 '**' はまだ未対応です");
+    if (consume(p, "**")) return new_binop_node(t, OP_POW, base, unary(p));
 
     return base;
 }

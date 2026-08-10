@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "diag.h"
+#include "sema.h"
 
 #include <stdio.h>
 
@@ -40,8 +41,20 @@ typedef struct {
     // 現在のループ（break / continue の飛び先）。第7章
     struct LoopCtx *loop;
 
-    bool printf_declared;  // printf の declare を出したか（第7章）
+    // 文字列リテラルの共有と declare の重複排除（第9章）
+    struct StrLit *strs;
+    struct StrLit *decled;
+    int str_counter;
 } Emitter;
+
+// 出力済みの文字列リテラル / declare を覚えておくための小さなリスト。
+typedef struct StrLit StrLit;
+struct StrLit {
+    char *bytes;
+    int len;
+    char *label;
+    StrLit *next;
+};
 
 // break / continue の飛び先（規約 6.5）。
 //
@@ -77,6 +90,7 @@ static const char *llvm_type(Type *t) {
         case TY_INT: return "i64";
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
+        case TY_STR: return "ptr";    // 参照型（第9章）
         default: UNREACHABLE();
     }
 }
@@ -90,6 +104,7 @@ static const char *llvm_mem_type(Type *t) {
     switch (t->kind) {
         case TY_INT: return "i64";
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
+        case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -112,8 +127,9 @@ static const char *llvm_binop(Node *n) {
         case OP_ADD: return "add";
         case OP_SUB: return "sub";
         case OP_MUL: return "mul";
-        case OP_FLOORDIV: return "sdiv";  // 符号付き除算
-        case OP_MOD: return "srem";       // 符号付き剰余
+        // OP_FLOORDIV / OP_MOD / OP_POW はここに来ません。
+        // ★ 第9章で「0 除算・負の指数を検査する」ためにランタイム関数
+        //   （my_floordiv / my_mod / my_ipow）の呼び出しに変わりました（規約 R10）。
         case OP_BITAND: return "and";
         case OP_BITOR: return "or";
         case OP_BITXOR: return "xor";
@@ -216,6 +232,60 @@ static void ensure_block(Emitter *e) {
     emit_label(e, l);  // 終端済みなので br は補われない
 }
 
+// ── 文字列リテラル（第9章）────────────────────────────────
+//
+// ★ 同じ内容のリテラルは 1 つにまとめます（線形探索で十分）。
+
+// IR の文字列に 1 バイト出力する。
+//
+// ⚠️ 安全策として、ASCII 印字可能文字**以外はすべて** \XX にします。
+//    「どの文字をエスケープすべきか」を考えなくて済むようにするためです。
+//    UTF-8 の日本語も各バイトが \XX になるだけで、そのまま通ります。
+static void emit_ir_byte(StrBuf *sb, unsigned char c) {
+    if (c >= 0x20 && c < 0x7F && c != '"' && c != '\\')
+        sb_printf(sb, "%c", c);
+    else
+        sb_printf(sb, "\\%02X", c);
+}
+
+static char *intern_str(Emitter *e, const char *bytes, int len) {
+    for (StrLit *sl = e->strs; sl; sl = sl->next)
+        if (sl->len == len && memcmp(sl->bytes, bytes, (size_t)len) == 0)
+            return sl->label;
+
+    StrBuf lab;
+    sb_init(&lab);
+    sb_printf(&lab, "@.str.%d", e->str_counter++);
+
+    // ⚠️ 長さは「バイト数 + 1」。NUL の分を忘れない。
+    StrBuf g;
+    sb_init(&g);
+    sb_printf(&g, "%s = private unnamed_addr constant [%d x i8] c\"", sb_str(&lab),
+              len + 1);
+    for (int i = 0; i < len; i++) emit_ir_byte(&g, (unsigned char)bytes[i]);
+    sb_printf(&g, "\\00\"\n");
+    sb_printf(&e->globals, "%s", sb_str(&g));
+
+    StrLit *sl = xmalloc(sizeof(StrLit));
+    sl->bytes = (char *)bytes;
+    sl->len = len;
+    sl->label = sb_str(&lab);
+    sl->next = e->strs;
+    e->strs = sl;
+    return sl->label;
+}
+
+// ランタイム関数を宣言する（1 回だけ）。
+static void declare_rt(Emitter *e, const char *sig) {
+    for (StrLit *d = e->decled; d; d = d->next)
+        if (strcmp(d->label, sig) == 0) return;
+    sb_printf(&e->decls, "declare %s\n", sig);
+    StrLit *d = xmalloc(sizeof(StrLit));
+    d->label = (char *)sig;
+    d->next = e->decled;
+    e->decled = d;
+}
+
 // ── 式の生成 ────────────────────────────────────────────────
 //
 // gen_expr の約束：
@@ -251,6 +321,43 @@ static char *gen_expr(Emitter *e, Node *n) {
             //    動いていました。比較演算子で初めてこの前提が崩れます。
             Type *ot = n->lhs->type;
 
+            // ── 文字列（第9章）──────────────────────────────
+            if (ot->kind == TY_STR) {
+                if (n->op == OP_ADD) {
+                    declare_rt(e, "ptr @my_str_concat(ptr, ptr)");
+                    sb_printf(&e->fn, "  %s = call ptr @my_str_concat(ptr %s, ptr %s)\n",
+                              t, l, r);
+                    return t;
+                }
+                // ⚠️ 比較は「内容」で行う（言語仕様 4.3）。ポインタ比較ではない。
+                //   my_str_cmp が strcmp の符号を返すので、0 と比べる述語を
+                //   変えるだけで 6 種類すべてに対応できます。
+                declare_rt(e, "i64 @my_str_cmp(ptr, ptr)");
+                char *c = new_tmp(e);
+                sb_printf(&e->fn, "  %s = call i64 @my_str_cmp(ptr %s, ptr %s)\n", c,
+                          l, r);
+                sb_printf(&e->fn, "  %s = icmp %s i64 %s, 0\n", t,
+                          icmp_pred(n->op, ty_int), c);
+                return t;
+            }
+
+            // ── 検査つきの算術（規約 R10。第9章）──────────────
+            //
+            // ★ 0 除算は SIGFPE でプロセスが死にます。何が起きたか分からない
+            //   より、メッセージを出して死ぬほうが親切です。分岐を IR に出さず、
+            //   ランタイム関数に押し込むのが R10 の実践です。
+            if (n->op == OP_FLOORDIV || n->op == OP_MOD || n->op == OP_POW) {
+                const char *fn = n->op == OP_FLOORDIV ? "my_floordiv"
+                                 : n->op == OP_MOD    ? "my_mod"
+                                                      : "my_ipow";
+                StrBuf sig;
+                sb_init(&sig);
+                sb_printf(&sig, "i64 @%s(i64, i64)", fn);
+                declare_rt(e, sb_str(&sig));
+                sb_printf(&e->fn, "  %s = call i64 @%s(i64 %s, i64 %s)\n", t, fn, l, r);
+                return t;
+            }
+
             if (is_compare(n->op))
                 sb_printf(&e->fn, "  %s = icmp %s %s %s, %s\n", t,
                           icmp_pred(n->op, ot), llvm_type(ot), l, r);
@@ -264,6 +371,11 @@ static char *gen_expr(Emitter *e, Node *n) {
             // True / False は i1 の即値。LLVM は "true" / "false" と書けます。
             return n->ival ? "true" : "false";
         }
+
+        case ND_STR:
+            // ★ リテラルは .rodata の定数。ラベルをそのまま ptr として使えます
+            //   （opaque pointer なので getelementptr は不要）。
+            return intern_str(e, n->sval, n->slen);
 
         case ND_LOGICAL:
             return gen_logical(e, n);
@@ -417,22 +529,40 @@ static void gen_while(Emitter *e, Node *n) {
 // print(e) の暫定実装。C の printf を借ります。
 //
 // ★ 第1章で用意した globals / decls バッファが、ここで初めて使われます。
-static void gen_print_call(Emitter *e, Node *n) {
-    // 書式文字列と declare は、最初に print が現れたときに 1 回だけ出す
-    if (!e->printf_declared) {
-        // ⚠️ [6 x i8] の 6 は "%lld\n\0" のバイト数。数え間違えると壊れます。
-        sb_printf(&e->globals,
-                  "@.fmt.int = private unnamed_addr constant [6 x i8] "
-                  "c\"%%lld\\0A\\00\"\n");
-        sb_printf(&e->decls, "declare i32 @printf(ptr noundef, ...)\n");
-        e->printf_declared = true;
-    }
+// 組み込み関数の呼び出し（第9章）。
+//
+// ★ sema が選んだ候補（n->builtin）に従って、対応するランタイム関数を呼ぶだけ。
+//   「どの実装を呼ぶか」の判断は sema 側で終わっています。
+static char *gen_builtin_call(Emitter *e, Node *n) {
+    const Builtin *b = n->builtin;
+    Type *at = type_from_kind(b->arg);
+    Type *rt = type_from_kind(b->ret);
+
+    // ⚠️ bool は Mython のレジスタ上では i1 ですが、C 側は long long で
+    //    受け取ります。境界で i64 に広げます（規約 R5 と同じ考え方）。
+    const char *argty = at->kind == TY_BOOL ? "i64" : llvm_type(at);
+
+    // declare を 1 回だけ出す
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "%s @%s(%s)", llvm_type(rt), b->impl, argty);
+    declare_rt(e, sb_str(&sig));
 
     char *v = gen_expr(e, n->args);
+    if (at->kind == TY_BOOL) {
+        char *z = new_tmp(e);
+        sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", z, v);
+        v = z;
+    }
+
+    if (rt->kind == TY_NONE) {
+        sb_printf(&e->fn, "  call void @%s(%s %s)\n", b->impl, argty, v);
+        return NULL;
+    }
     char *t = new_tmp(e);
-    // ⚠️ 可変長引数の呼び出しには関数型 (ptr, ...) を書く必要があります。
-    sb_printf(&e->fn, "  %s = call i32 (ptr, ...) @printf(ptr @.fmt.int, i64 %s)\n",
-              t, v);
+    sb_printf(&e->fn, "  %s = call %s @%s(%s %s)\n", t, llvm_type(rt), b->impl,
+              argty, v);
+    return t;
 }
 
 // 関数呼び出し。
@@ -441,10 +571,7 @@ static void gen_print_call(Emitter *e, Node *n) {
 //      %t0 = call void @f()   ✗
 //      call void @f()         ✅
 static char *gen_call(Emitter *e, Node *n) {
-    if (strcmp(n->name, "print") == 0) {
-        gen_print_call(e, n);
-        return NULL;
-    }
+    if (n->builtin) return gen_builtin_call(e, n);
 
     // 引数を左から順に評価する（言語仕様 4.5）
     StrBuf args;
@@ -614,10 +741,14 @@ static void gen_func(Emitter *e, Node *n) {
 
 // グローバル変数を出力する（言語仕様 6.2）
 static void gen_global(Emitter *e, Node *n) {
-    // 初期化式が定数であることは sema が保証している
-    long long init = n->rhs->ival;
+    // 初期化式がリテラルであることは sema が保証している
+    if (n->type->kind == TY_STR) {
+        char *lab = intern_str(e, n->rhs->sval, n->rhs->slen);
+        sb_printf(&e->globals, "%s = global ptr %s\n", n->ir_name, lab);
+        return;
+    }
     sb_printf(&e->globals, "%s = global %s %lld\n", n->ir_name,
-              llvm_mem_type(n->type), init);
+              llvm_mem_type(n->type), n->rhs->ival);
 }
 
 // C の main を出力する。

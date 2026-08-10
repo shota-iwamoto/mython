@@ -1,0 +1,5 @@
+# OUTPUT: hello, Mython
+def main() -> int:
+    name: str = "Mython"
+    print("hello, " + name)
+    return 0

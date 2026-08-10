@@ -109,10 +109,14 @@ note: 対応する '(' はここです
 
 ## 第III部 データを扱う
 
-### ⬜ 第9章 文字列と C ランタイム連携
-- **達成目標**: `print("hello")` / `"a" + "b"` / `len(s)` が動く
-- 学ぶこと: グローバル定数の出力 / 文字のエスケープ / **`runtime/runtime.c` の新設** / `extern` 宣言 / `malloc`
-- 成果物: `runtime/runtime.c`（`my_print_str`、`my_str_concat` など）
+### ✅ 第9章 文字列と C ランタイム連携
+- **達成目標**: `print("hello")` / `"a" + "b"` / `len(s)` が動く。**FizzBuzz が本物になる**
+- 学ぶこと: グローバル定数の出力 / 文字のエスケープ / **`runtime/runtime.c` の新設** / `malloc` / 規約 R10
+- 成果物: `runtime/runtime.c`（17 関数）、`TY_STR`、組み込み関数の表、
+  文字列の連結と内容比較、テスト 176 件
+- 注記: 第2章から先送りしていた **`**`** と **0 除算の実行時検査**もここで回収。
+  「複雑さは IR ではなくランタイムに押し出す」（R10）を実践する章
+- [→ 第9章](chapters/ch09-strings-and-runtime.md)
 
 ### ⬜ 第10章 list[T]（動的配列）
 - **達成目標**: `xs: list[int] = []` / `xs.append(1)` / `xs[0]` / `len(xs)` が動く

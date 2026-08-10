@@ -17,6 +17,11 @@
 #include "types.h"
 #include "util.h"
 
+// ビルド時に Makefile が -DMYTHON_RUNTIME_O=... で渡してきます（第9章）。
+#ifndef MYTHON_RUNTIME_O
+#define MYTHON_RUNTIME_O "build/runtime.o"
+#endif
+
 static void usage(int status) {
     FILE *out = status == 0 ? stdout : stderr;
     fprintf(out,
@@ -144,7 +149,10 @@ int main(int argc, char **argv) {
 
     StrBuf cmd;
     sb_init(&cmd);
-    sb_printf(&cmd, "clang %s '%s' -o '%s'", opt.opt_level, ll, opt.output);
+    // ★ 第9章：ランタイム（runtime/runtime.c をコンパイルしたもの）をリンクする。
+    //   ここで初めて「コンパイラが生成した IR 以外のコード」が実行ファイルに入ります。
+    sb_printf(&cmd, "clang %s '%s' '%s' -o '%s'", opt.opt_level, ll,
+              MYTHON_RUNTIME_O, opt.output);
 
     int rc = system(sb_str(&cmd));
     if (rc != 0) {

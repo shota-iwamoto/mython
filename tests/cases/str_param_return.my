@@ -1,0 +1,7 @@
+# OUTPUT: [Mython]
+def wrap(s: str) -> str:
+    return "[" + s + "]"
+
+def main() -> int:
+    print(wrap("Mython"))
+    return 0

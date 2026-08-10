@@ -16,6 +16,7 @@ typedef enum {
     TK_PUNCT,    // 記号（+ - * // ( ) など）
     TK_IDENT,    // 識別子（変数名・型名）
     TK_KEYWORD,  // 予約語（if / def / and など。言語仕様 2.5）
+    TK_STR,      // 文字列リテラル（第9章。エスケープは解決済み）
 
     // ── 仮想トークン（ソース上に対応する文字がない）──
     //
@@ -27,7 +28,7 @@ typedef enum {
     TK_DEDENT,   // ブロックの終了
 
     // ── 第5章以降で追加していく ──
-    // TK_IDENT, TK_KEYWORD, TK_STRING, TK_FLOAT,
+    // TK_FLOAT,
 } TokenKind;
 
 typedef struct Token Token;
@@ -46,7 +47,11 @@ struct Token {
 
     // ── 値（kind によって使い分ける）──
     long long ival;  // TK_INT
-    char *text;      // TK_IDENT / TK_KEYWORD（NUL 終端した複製）
+    char *text;      // TK_IDENT / TK_KEYWORD / TK_STR（NUL 終端した複製）
+                     //   TK_STR はエスケープを解決した後の中身
+    int slen;        // TK_STR のバイト長。
+                     // ⚠️ 将来 "a\0b" を許すと strlen では測れないので、
+                     //    最初から長さを別に持たせておきます。
 };
 
 // トークンの可変長配列。

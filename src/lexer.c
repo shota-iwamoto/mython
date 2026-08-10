@@ -319,6 +319,75 @@ static void read_ident(Lexer *lx) {
     t->text = xstrndup(start, (size_t)len);
 }
 
+// ── 文字列リテラルの読み取り（第9章）──────────────────────
+
+// エスケープの対応表。
+//
+// ⚠️ 解決するのは字句解析器の仕事です。ここから先の段階は
+//    「もう解決済みのバイト列」だけを見ればよくなります。
+static const struct {
+    char c;
+    char to;
+} ESCAPES[] = {
+    {'n', '\n'},  {'t', '\t'},  {'r', '\r'}, {'0', '\0'},
+    {'\\', '\\'}, {'"', '"'},  {'\'', '\''},
+    {0, 0},
+};
+
+static void read_string(Lexer *lx) {
+    const char *start = lx->p;
+    char quote = *lx->p;
+    lx->p++;  // 開き引用符
+
+    StrBuf sb;
+    sb_init(&sb);
+    int len = 0;
+
+    for (;;) {
+        char c = *lx->p;
+
+        // ⚠️ 行をまたがない。次の行まで読みに行くと、エラー位置が
+        //    遠くなって原因が分からなくなります。
+        if (c == '\0' || c == '\n') {
+            Token tmp = span_token(lx, start, start + 1);
+            error_at_hint(&tmp, "文字列は同じ行の中で閉じてください",
+                          "文字列が閉じられていません");
+        }
+
+        if (c == quote) {
+            lx->p++;  // 閉じ引用符
+            break;
+        }
+
+        if (c == '\\') {
+            char e = lx->p[1];
+            const char *to = NULL;
+            for (int i = 0; ESCAPES[i].c; i++)
+                if (ESCAPES[i].c == e) to = &ESCAPES[i].to;
+
+            if (!to) {
+                Token tmp = span_token(lx, lx->p, lx->p + 2);
+                error_at_hint(&tmp,
+                              "使えるのは \\n \\t \\r \\0 \\\\ \\\" \\' です。"
+                              "バックスラッシュそのものを書くには \\\\ とします",
+                              "未知のエスケープシーケンス '\\%c' です", e);
+            }
+            sb_printf(&sb, "%c", *to);
+            len++;
+            lx->p += 2;
+            continue;
+        }
+
+        sb_printf(&sb, "%c", c);
+        len++;
+        lx->p++;
+    }
+
+    Token *t = tv_push(lx, TK_STR, start, (int)(lx->p - start));
+    t->text = sb_str(&sb);
+    t->slen = len;
+}
+
 // ── 記号の読み取り ──────────────────────────────────────────
 
 // ★ 長い記号を先に並べること。
@@ -458,6 +527,12 @@ TokenVec tokenize(const char *file, const char *src) {
             continue;
         }
 
+        // 文字列リテラル（第9章）
+        if (*lx.p == '"' || *lx.p == '\'') {
+            read_string(&lx);
+            continue;
+        }
+
         // 記号
         if (read_punct(&lx)) continue;
 
@@ -525,6 +600,7 @@ const char *token_kind_name(TokenKind kind) {
         case TK_PUNCT: return "PUNCT";
         case TK_IDENT: return "IDENT";
         case TK_KEYWORD: return "KEYWORD";
+        case TK_STR: return "STR";
         case TK_NEWLINE: return "NEWLINE";
         case TK_INDENT: return "INDENT";
         case TK_DEDENT: return "DEDENT";

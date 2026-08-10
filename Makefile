@@ -31,6 +31,19 @@ OPT      := $(LLVM_BIN)/opt
 LLI      := $(LLVM_BIN)/lli
 LLVM_AS  := $(LLVM_BIN)/llvm-as
 
+# ── ランタイム（第9章）─────────────────────────────────────
+# ユーザーのプログラムにリンクされる C のコード。
+#
+# ⚠️ コンパイラ本体（-O0 -g）とは目的が違うので -O2 でビルドします。
+#    ランタイムは「ユーザーのプログラムの一部」として動くからです。
+RUNTIME_SRC := runtime/runtime.c
+RUNTIME_OBJ := build/runtime.o
+RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
+
+# コンパイラにランタイムの場所を教える。
+# ⚠️ stage0 だけの割り切り（ビルドツリー内で完結すればよい）。第20章で見直します。
+CFLAGS  += -DMYTHON_RUNTIME_O='"$(abspath $(RUNTIME_OBJ))"'
+
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
@@ -38,10 +51,14 @@ TARGET  := build/mythonc
 
 .PHONY: all clean test test-one asan info
 
-all: $(TARGET)
+all: $(TARGET) $(RUNTIME_OBJ)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@
+
+$(RUNTIME_OBJ): $(RUNTIME_SRC)
+	@mkdir -p build
+	$(CC) $(RUNTIME_CFLAGS) -c $< -o $@
 
 # -MMD -MP でヘッダの依存関係を自動生成する。
 # これがないと、ヘッダを直したのに再ビルドされず不思議なバグに悩まされます。
@@ -52,17 +69,17 @@ build/%.o: src/%.c
 -include $(DEPS)
 
 # ── テスト ──────────────────────────────────────────────────
-test: $(TARGET)
+test: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh
 
 # 1 ケースだけ実行: make test-one CASE=tests/cases/int_42.my
-test-one: $(TARGET)
+test-one: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh $(CASE)
 
 # ── AddressSanitizer ビルド ─────────────────────────────────
 # セグフォの原因が分からないときに使います。
 #   make asan && ./build/mythonc-asan tests/cases/int_42.my
-asan:
+asan: $(RUNTIME_OBJ)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fsanitize=address,undefined $(SRCS) -o build/mythonc-asan
 

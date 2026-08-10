@@ -1,0 +1,6 @@
+# OUTPUT: 6
+# OUTPUT: 0
+def main() -> int:
+    print(len("Mython"))
+    print(len(""))
+    return 0

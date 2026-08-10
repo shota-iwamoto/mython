@@ -180,6 +180,9 @@ static bool op_supports(OpKind op, Type *t) {
         // 言語仕様 4.2：int に '/' は使えない（'//' を使う）
         return op != OP_TRUEDIV;
     }
+    // str に許すのは連結の '+' だけ（言語仕様 4.2 の表）。
+    // ⚠️ Python の "ab" * 3 は便利だが、v1 では採用しない。
+    if (t->kind == TY_STR) return op == OP_ADD;
     return false;  // ★ bool に算術・ビット演算は使えない
 }
 
@@ -307,6 +310,7 @@ static Type *check_expr(Sema *s, Node *n) {
     switch (n->kind) {
         case ND_INT: t = ty_int; break;
         case ND_BOOL: t = ty_bool; break;
+        case ND_STR: t = ty_str; break;
         case ND_VAR: t = check_var(s, n); break;
         case ND_BINOP: t = check_binop(s, n); break;
         case ND_LOGICAL: t = check_logical(s, n); break;
@@ -434,38 +438,87 @@ static void check_block(Sema *s, Node *n) {
     scope_pop(s);
 }
 
-// 組み込み関数 print の検査（第8章で「文」から「関数」になった）。
+// ── 組み込み関数の表（第9章）──────────────────────────────
 //
-// ⚠️ まだ int 専用です。言語仕様 7 節では str / bool / float の
-//    オーバーロードがありますが、str も bool の文字列化も第9章です。
-static Type *check_print_call(Sema *s, Node *n) {
+// ★ 名前 + 引数型 で 1 つの候補を表します。
+//   sema は「型が合う候補があるか」を、codegen は「どの C 関数を呼ぶか」を
+//   同じ表から引きます。
+//
+// 🤔 なぜ print だけオーバーロードを許すのか（言語仕様 7 節）
+//   ユーザー定義関数のオーバーロードは許しません（名前解決が複雑になる）。
+//   組み込みは表を引くだけで解決できるので、「言語機能」ではなく
+//   「表のエントリ」として扱えます。実装が増えません。
+const Builtin BUILTINS[] = {
+    // 名前     引数型     戻り型    呼び出す C 関数
+    {"print", TY_INT, TY_NONE, "my_print_int"},
+    {"print", TY_STR, TY_NONE, "my_print_str"},
+    {"print", TY_BOOL, TY_NONE, "my_print_bool"},
+    {"len", TY_STR, TY_INT, "my_str_len"},
+    {"str", TY_INT, TY_STR, "my_str_from_int"},
+    {"str", TY_BOOL, TY_STR, "my_str_from_bool"},
+    {"int", TY_STR, TY_INT, "my_str_to_int"},
+    {"ord", TY_STR, TY_INT, "my_ord"},
+    {"chr", TY_INT, TY_STR, "my_chr"},
+    {"exit", TY_INT, TY_NONE, "my_exit"},
+    {"panic", TY_STR, TY_NONE, "my_panic"},
+    {NULL, 0, 0, NULL},
+};
+
+// その名前の組み込みが 1 つでもあるか
+bool is_builtin_name(const char *name) {
+    for (int i = 0; BUILTINS[i].name; i++)
+        if (strcmp(BUILTINS[i].name, name) == 0) return true;
+    return false;
+}
+
+// 受け取れる型の一覧（エラーメッセージ用）。第5章の type_name_list と同じ発想。
+static const char *builtin_arg_types(const char *name) {
+    StrBuf sb;
+    sb_init(&sb);
+    bool first = true;
+    for (int i = 0; BUILTINS[i].name; i++) {
+        if (strcmp(BUILTINS[i].name, name) != 0) continue;
+        Type *t = type_from_kind(BUILTINS[i].arg);
+        sb_printf(&sb, "%s%s", first ? "" : ", ", type_name(t));
+        first = false;
+    }
+    return sb_str(&sb);
+}
+
+// 組み込み関数の呼び出しを検査し、使う候補を n->builtin に記録する。
+static Type *check_builtin_call(Sema *s, Node *n) {
     int nargs = 0;
     for (Node *a = n->args; a; a = a->next) nargs++;
     if (nargs != 1) {
         Diag d = {0};
-        d.message = diag_fmt("print は 1 個の引数を取りますが、%d 個渡されました", nargs);
+        d.message = diag_fmt("%s は 1 個の引数を取りますが、%d 個渡されました",
+                             n->name, nargs);
         d.primary.tok = n->tok;
         d.primary.label = "引数の個数が違います";
-        d.hint = "print(値) の形で使ってください";
+        d.hint = diag_fmt("%s(値) の形で使ってください", n->name);
         diag_fail(&d);
     }
 
-    Type *t = check_expr(s, n->args);
-    if (t->kind != TY_INT) {
-        Diag d = {0};
-        d.message = diag_fmt("print はまだ '%s' 型を出力できません", type_name(t));
-        d.primary.tok = n->args->tok;
-        d.primary.label = diag_fmt("これは '%s' 型です", type_name(t));
-        d.hint = "print は今のところ int 専用です"
-                 "（bool / str の出力は第9章で対応します）";
-        diag_fail(&d);
+    Type *at = check_expr(s, n->args);
+    for (int i = 0; BUILTINS[i].name; i++) {
+        if (strcmp(BUILTINS[i].name, n->name) != 0) continue;
+        if (BUILTINS[i].arg != (int)at->kind) continue;
+        n->builtin = &BUILTINS[i];  // ★ codegen はこれを見る
+        return type_from_kind(BUILTINS[i].ret);
     }
-    return ty_none;  // ★ 値を返さない
+
+    Diag d = {0};
+    d.message = diag_fmt("%s は '%s' 型を受け取れません", n->name, type_name(at));
+    d.primary.tok = n->args->tok;
+    d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+    d.hint = diag_fmt("%s が受け取れるのは %s です", n->name,
+                      builtin_arg_types(n->name));
+    diag_fail(&d);
 }
 
 // 関数呼び出しの検査（docs/spec/type-system.md 5.7 の順序に従う）
 static Type *check_call(Sema *s, Node *n) {
-    if (strcmp(n->name, "print") == 0) return check_print_call(s, n);
+    if (is_builtin_name(n->name)) return check_builtin_call(s, n);
 
     // ① 定義されているか
     FuncSig *f = lookup_func(s, n->name);
@@ -633,9 +686,10 @@ static bool always_returns(Node *n) {
 // ── パス 1：宣言の登録 ─────────────────────────────────────
 
 static void declare_func(Sema *s, Node *n) {
-    if (strcmp(n->name, "print") == 0)
-        error_at_hint(n->tok, "print は組み込み関数です。別の名前を使ってください",
-                      "'print' は再定義できません");
+    if (is_builtin_name(n->name))
+        error_at_hint(n->tok, diag_fmt("%s は組み込み関数です。別の名前を使ってください",
+                                       n->name),
+                      "'%s' は再定義できません", n->name);
 
     FuncSig *prev = lookup_func(s, n->name);
     if (prev) {
@@ -721,11 +775,12 @@ static void declare_global(Sema *s, Node *n) {
 
     // ⚠️ 初期化式はコンパイル時定数のみ（言語仕様 6.2 の v1 制限）。
     //    計算を許すと「どちらを先に初期化するか」という初期化順序問題が起きます。
-    if (n->rhs->kind != ND_INT && n->rhs->kind != ND_BOOL) {
+    if (n->rhs->kind != ND_INT && n->rhs->kind != ND_BOOL &&
+        n->rhs->kind != ND_STR) {
         Diag d = {0};
         d.message = "グローバル変数の初期化式は定数でなければなりません";
         d.primary.tok = n->rhs->tok;
-        d.primary.label = "ここには整数か True / False だけが書けます";
+        d.primary.label = "ここには整数・True / False・文字列リテラルだけが書けます";
         d.hint = "計算が必要なら main の中でローカル変数にしてください";
         diag_fail(&d);
     }

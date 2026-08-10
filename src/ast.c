@@ -21,6 +21,13 @@ Node *new_bool_node(Token *tok, bool value) {
     return n;
 }
 
+Node *new_str_node(Token *tok, char *bytes, int len) {
+    Node *n = new_node(ND_STR, tok);
+    n->sval = bytes;
+    n->slen = len;
+    return n;
+}
+
 Node *new_binop_node(Token *tok, OpKind op, Node *lhs, Node *rhs) {
     Node *n = new_node(ND_BINOP, tok);
     n->op = op;
@@ -64,6 +71,7 @@ const char *op_symbol(OpKind op) {
         case OP_BITXOR: return "^";
         case OP_SHL: return "<<";
         case OP_SHR: return ">>";
+        case OP_POW: return "**";
         case OP_EQ: return "==";
         case OP_NE: return "!=";
         case OP_LT: return "<";
@@ -98,6 +106,9 @@ static void dump(Node *n, int depth) {
             break;
         case ND_BOOL:
             printf("(bool %s)\n", n->ival ? "True" : "False");
+            break;
+        case ND_STR:
+            printf("(str %d bytes)\n", n->slen);
             break;
         case ND_LOGICAL:
             printf("(logical %s\n", op_symbol(n->op));

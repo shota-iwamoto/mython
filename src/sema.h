@@ -21,7 +21,24 @@
 #ifndef MYTHON_SEMA_H
 #define MYTHON_SEMA_H
 
+#include <stdbool.h>
+
 #include "ast.h"
+
+// 組み込み関数の候補（第9章）。
+// ★ sema と codegen が同じ表を見ます。
+//   sema は「型が合う候補があるか」、codegen は「どの C 関数を呼ぶか」。
+typedef struct Builtin_ Builtin;
+struct Builtin_ {
+    const char *name;   // Mython 側の名前（print, len, ...）
+    int arg;            // 引数の TypeKind
+    int ret;            // 戻り値の TypeKind
+    const char *impl;   // 呼び出すランタイム関数（my_print_int など）
+};
+
+extern const Builtin BUILTINS[];
+bool is_builtin_name(const char *name);
+
 
 // AST を検査し、各ノードの type を埋める。
 // 問題があればエラーを表示して終了する（戻ってこない）。
