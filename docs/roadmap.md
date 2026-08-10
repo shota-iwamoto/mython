@@ -87,9 +87,14 @@ note: 対応する '(' はここです
   第5章で未テストだった「型が一致しません」をここで回収。比較連鎖は構文エラー（Python との差異）
 - [→ 第6章](chapters/ch06-bool-and-logical-ops.md)
 
-### ⬜ 第7章 制御構文（if / elif / else / while）
-- **達成目標**: FizzBuzz が書ける（`print` は暫定実装で可）
+### ✅ 第7章 制御構文（if / elif / else / while）
+- **達成目標**: FizzBuzz の制御構造が書ける（`print` は int 専用の暫定実装）
 - 学ぶこと: 基本ブロック / `br` 命令 / 制御フローグラフ / `break`・`continue` のジャンプ先管理
+- 成果物: `block()`（**第4章の INDENT / DEDENT を消費**）、`expect()`、`if`/`while`/`break`/`continue`/`pass`、
+  `print` の暫定実装、ブロックスコープ、IR 名の一意化、`dead.N`（R7）、テスト 118 件
+- 注記: FizzBuzz の**言葉**（"Fizz"）は `str` が要るので第9章。この章では負の数で代用。
+  第5章の「変数名がそのまま一意な IR 名」という前提が兄弟スコープで崩れ、sema が名前を割り当てる方式に変更
+- [→ 第7章](chapters/ch07-control-flow.md)
 
 ### ⬜ 第8章 関数定義と呼び出し
 - **達成目標**: 再帰でフィボナッチが計算できる

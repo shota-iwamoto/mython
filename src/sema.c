@@ -17,7 +17,8 @@
 
 typedef struct VarEntry VarEntry;
 struct VarEntry {
-    char *name;
+    char *name;      // Mython 上の名前（エラーメッセージ用）
+    char *ir_name;   // LLVM 上の名前（%x, %x.1, ...）。第7章で追加
     Type *type;
     Token *decl_tok;  // 宣言された位置（再宣言エラーで「前の宣言はここ」を示す）
     VarEntry *next;
@@ -31,8 +32,17 @@ struct Scope {
 
 // 意味解析の状態。
 // 第8章で「今どの関数を検査中か」（戻り型の検査に必要）が加わります。
+// これまでに使った IR 名の記録（衝突を避けるため）
+typedef struct UsedName UsedName;
+struct UsedName {
+    char *name;
+    UsedName *next;
+};
+
 typedef struct {
-    Scope *scope;  // 現在のスコープ
+    Scope *scope;      // 現在のスコープ
+    int loop_depth;    // 今いるループの深さ（break / continue の検査用）
+    UsedName *used;    // 割り当て済みの IR 名
 } Sema;
 
 static Scope *scope_push(Sema *s) {
@@ -61,9 +71,56 @@ static VarEntry *lookup(Sema *s, const char *name) {
     return NULL;
 }
 
+// ── IR 名の割り当て（第7章）──────────────────────────────
+//
+// ★ 第5章の「シャドーイング禁止なので変数名がそのまま一意」という前提は、
+//   ブロックスコープが入ると崩れます。兄弟スコープが同じ名前を使えるからです。
+//
+//       if a:
+//           x: int = 1     ← %x
+//       if b:
+//           x: int = 2     ← %x（衝突！どちらも相手を隠していない）
+//
+//   衝突したら連番を足します。これは名前修飾（mangling）の入口で、
+//   第12章（メソッド）と第13章（モジュール）で本格的に必要になります。
+//
+// 🤔 なぜ sema がやるのか
+//   parser はスコープを知らず、codegen は宣言と参照を結びつける情報を
+//   持っていません。シンボルテーブルを持つ sema だけが両方できます。
+static bool name_used(Sema *s, const char *name) {
+    for (UsedName *u = s->used; u; u = u->next)
+        if (strcmp(u->name, name) == 0) return true;
+    return false;
+}
+
+static void remember_name(Sema *s, char *name) {
+    UsedName *u = xmalloc(sizeof(UsedName));
+    u->name = name;
+    u->next = s->used;
+    s->used = u;
+}
+
+static char *unique_ir_name(Sema *s, char *name) {
+    if (!name_used(s, name)) {
+        remember_name(s, name);
+        return name;
+    }
+    for (int i = 1;; i++) {
+        StrBuf sb;
+        sb_init(&sb);
+        sb_printf(&sb, "%s.%d", name, i);
+        char *cand = sb_str(&sb);
+        if (!name_used(s, cand)) {
+            remember_name(s, cand);
+            return cand;
+        }
+    }
+}
+
 static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
     VarEntry *v = xmalloc(sizeof(VarEntry));
     v->name = name;
+    v->ir_name = unique_ir_name(s, name);
     v->type = type;
     v->decl_tok = tok;
     v->next = s->scope->vars;
@@ -96,13 +153,18 @@ static bool op_supports(OpKind op, Type *t) {
 // 「ここには bool が必要」というエラー。
 // and の左辺・and の右辺・not の 3 か所で同じ形になるので関数にまとめます
 // （第2章の span_token、第4章の advance_newline と同じ「3 回目でまとめる」判断）。
-static Type *bool_required(Node *op_node, Node *operand, Type *actual) {
+// ★ 第7章で一般化：if / while の条件からも呼ばれるようになったので、
+//   「どこで bool が必要なのか」を文字列で受け取る形に変えました。
+//   ND_IF には op が無いため、op_symbol() を使う形のままでは書けません。
+//   最初から汎用に作らず、2 つ目の利用者が現れてから一般化する。
+static Type *bool_required(const char *message, const char *where_label,
+                           Token *where_tok, Node *operand, Type *actual) {
     Diag d = {0};
-    d.message = diag_fmt("演算子 '%s' には bool が必要です", op_symbol(op_node->op));
+    d.message = message;
     d.primary.tok = operand->tok;
     d.primary.label = diag_fmt("これは '%s' 型です", type_name(actual));
-    d.related.tok = op_node->tok;
-    d.related.label = diag_fmt("演算子 '%s' はここです", op_symbol(op_node->op));
+    d.related.tok = where_tok;
+    d.related.label = where_label;
     d.hint = "Mython は int を真偽値として扱いません（言語仕様 4.4）。"
              "比較を書いてください（例: x != 0）";
     diag_fail(&d);
@@ -166,8 +228,10 @@ static Type *check_logical(Sema *s, Node *n) {
     Type *l = check_expr(s, n->lhs);
     Type *r = check_expr(s, n->rhs);
 
-    if (l->kind != TY_BOOL) return bool_required(n, n->lhs, l);
-    if (r->kind != TY_BOOL) return bool_required(n, n->rhs, r);
+    char *msg = diag_fmt("演算子 '%s' には bool が必要です", op_symbol(n->op));
+    char *lbl = diag_fmt("演算子 '%s' はここです", op_symbol(n->op));
+    if (l->kind != TY_BOOL) return bool_required(msg, lbl, n->tok, n->lhs, l);
+    if (r->kind != TY_BOOL) return bool_required(msg, lbl, n->tok, n->rhs, r);
     return ty_bool;
 }
 
@@ -176,7 +240,11 @@ static Type *check_unary(Sema *s, Node *n) {
 
     // not は bool を取り bool を返す（言語仕様 4.4）
     if (n->op == OP_NOT) {
-        if (t->kind != TY_BOOL) return bool_required(n, n->lhs, t);
+        if (t->kind != TY_BOOL)
+            return bool_required(
+                diag_fmt("演算子 '%s' には bool が必要です", op_symbol(n->op)),
+                diag_fmt("演算子 '%s' はここです", op_symbol(n->op)), n->tok, n->lhs,
+                t);
         return ty_bool;
     }
 
@@ -197,6 +265,7 @@ static Type *check_var(Sema *s, Node *n) {
         d.hint = diag_fmt("使う前に宣言してください（例: %s: int = 0）", n->name);
         diag_fail(&d);
     }
+    n->ir_name = v->ir_name;  // ★ codegen はこれを使う
     return v->type;
 }
 
@@ -244,6 +313,24 @@ static void check_vardecl(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
+    // ②' 外側のスコープの変数を隠していないか（シャドーイング禁止：言語仕様 5.1）
+    //
+    // ★ 第5章で lookup と lookup_local を分けておいた判断が、ここで報われます。
+    //   同じスコープの再宣言（上）と、外側を隠す宣言（ここ）とで
+    //   別々の診断を出せます。1 つの関数で済ませていたら同じ文言でした。
+    VarEntry *outer = lookup(s, n->name);
+    if (outer) {
+        Diag d = {0};
+        d.message = diag_fmt("変数 '%s' は外側のスコープの変数を隠しています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "シャドーイングは禁止されています（言語仕様 5.1）";
+        d.related.tok = outer->decl_tok;
+        d.related.label = "外側の宣言はここです";
+        d.hint = "別の名前にするか、型注釈を外して既存の変数に代入してください"
+                 "（例: x = 1）";
+        diag_fail(&d);
+    }
+
     // ③ 初期化式の型が宣言した型に代入できるか
     Type *actual = check_expr(s, n->rhs);
     if (!type_equal(actual, declared)) {
@@ -261,7 +348,8 @@ static void check_vardecl(Sema *s, Node *n) {
     // ④ スコープに登録する。
     //    ★ 順序が重要：初期化式を検査した「後」に登録します。
     //      そうしないと `x: int = x` が自分自身を参照できてしまいます。
-    declare(s, n->name, declared, n->tok);
+    VarEntry *v = declare(s, n->name, declared, n->tok);
+    n->ir_name = v->ir_name;  // ★ codegen が alloca / store に使う名前
     n->type = declared;
 }
 
@@ -280,6 +368,7 @@ static void check_assign(Sema *s, Node *n) {
         diag_fail(&d);
     }
     target->type = v->type;
+    target->ir_name = v->ir_name;
 
     Type *actual = check_expr(s, n->rhs);
     if (!type_equal(actual, v->type)) {
@@ -295,15 +384,96 @@ static void check_assign(Sema *s, Node *n) {
     n->type = v->type;
 }
 
+// 条件式は bool でなければならない（言語仕様 5.3 / 5.4）
+static void check_cond(Sema *s, const char *where, Node *stmt_node, Node *cond) {
+    Type *t = check_expr(s, cond);
+    if (t->kind != TY_BOOL)
+        bool_required(diag_fmt("%sには bool が必要です", where),
+                      diag_fmt("%sはここです", where), stmt_node->tok, cond, t);
+}
+
+// ブロックは新しいスコープを作る。
+// ★ 第5章で作った scope_push / scope_pop が、ここで初めて入れ子で対になります。
+static void check_block(Sema *s, Node *n) {
+    scope_push(s);
+    for (Node *st = n->body; st; st = st->next) check_stmt(s, st);
+    scope_pop(s);
+}
+
+static void check_print(Sema *s, Node *n) {
+    Type *t = check_expr(s, n->lhs);
+
+    // ⚠️ 暫定実装なので int だけ。言語仕様では str / bool / float の
+    //    オーバーロードがありますが、str は第9章、bool の文字列化も第9章です。
+    if (t->kind != TY_INT) {
+        Diag d = {0};
+        d.message = diag_fmt("print はまだ '%s' 型を出力できません", type_name(t));
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = diag_fmt("これは '%s' 型です", type_name(t));
+        d.hint = "第7章の print は int 専用の暫定実装です"
+                 "（bool / str の出力は第9章で対応します）";
+        diag_fail(&d);
+    }
+}
+
 static void check_stmt(Sema *s, Node *n) {
     switch (n->kind) {
         case ND_VARDECL: check_vardecl(s, n); break;
         case ND_ASSIGN: check_assign(s, n); break;
+        case ND_BLOCK: check_block(s, n); break;
+        case ND_PRINT: check_print(s, n); break;
+        case ND_PASS: break;  // 何もしない
+
+        case ND_IF:
+            check_cond(s, "if の条件", n, n->lhs);
+            check_block(s, n->body);
+            // els は ND_BLOCK（else）か ND_IF（elif の脱糖結果）
+            if (n->els) check_stmt(s, n->els);
+            break;
+
+        case ND_WHILE:
+            check_cond(s, "while の条件", n, n->lhs);
+            s->loop_depth++;
+            check_block(s, n->body);
+            s->loop_depth--;
+            break;
+
+        case ND_BREAK:
+        case ND_CONTINUE: {
+            // ★ ここで弾いておけば、codegen は「飛び先が必ずある」と仮定できます。
+            //   （第5章で確立した「codegen は検査済みの AST だけを受け取る」）
+            if (s->loop_depth > 0) break;
+            const char *kw = n->kind == ND_BREAK ? "break" : "continue";
+            Diag d = {0};
+            d.message = diag_fmt("'%s' はループの外では使えません", kw);
+            d.primary.tok = n->tok;
+            d.primary.label = diag_fmt("この '%s' を囲む while がありません", kw);
+            d.hint = diag_fmt("'%s' は while の中でだけ使えます", kw);
+            diag_fail(&d);
+            break;
+        }
+
         default: check_expr(s, n); break;  // 式文
     }
 }
 
 // ── 入口 ───────────────────────────────────────────────────
+
+// 値を持つノード（式）か。
+// 暫定仕様「プログラムの値は最後の文の値」の検査に使います。
+static bool is_expr_node(NodeKind k) {
+    switch (k) {
+        case ND_INT:
+        case ND_BOOL:
+        case ND_VAR:
+        case ND_BINOP:
+        case ND_LOGICAL:
+        case ND_UNARY:
+            return true;
+        default:
+            return false;
+    }
+}
 
 void sema(Node *ast) {
     if (ast->kind != ND_BLOCK) UNREACHABLE();
@@ -320,7 +490,11 @@ void sema(Node *ast) {
     // ⚠️ 暫定仕様：プログラムの値は最後の文の値なので、
     //    最後の文は「値を持つ式」でなければなりません。
     //    第8章で `def main() -> int:` と `return` に置き換わります。
-    if (last->kind == ND_VARDECL || last->kind == ND_ASSIGN) {
+    // ★ 第7章で条件を反転しました。
+    //   第5章は「宣言か代入なら駄目」と書いていましたが、文の種類が増えると
+    //   足し忘れます（if / while / print / break ... すべて値を持ちません）。
+    //   「値を持つのはこれだけ」と列挙するほうが、増えても安全です。
+    if (!is_expr_node(last->kind)) {
         Diag d = {0};
         d.message = "プログラムの最後は式でなければなりません";
         d.primary.tok = last->tok;

@@ -1,0 +1,5 @@
+# OUTPUT: 1
+if True:
+    pass
+print(1)
+0

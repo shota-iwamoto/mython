@@ -1,0 +1,4 @@
+# ERROR: 'continue' はループの外では使えません
+if True:
+    continue
+0

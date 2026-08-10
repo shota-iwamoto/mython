@@ -1,0 +1,7 @@
+# ERROR: if の条件には bool が必要です
+# ERROR: これは 'int' 型です
+# ERROR: = ヒント: Mython は int を真偽値として扱いません
+x: int = 1
+if x:
+    print(1)
+0

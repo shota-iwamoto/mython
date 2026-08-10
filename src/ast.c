@@ -135,6 +135,36 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_IF:
+            printf("(if\n");
+            dump(n->lhs, depth + 1);
+            dump(n->body, depth + 1);
+            if (n->els) dump(n->els, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_WHILE:
+            printf("(while\n");
+            dump(n->lhs, depth + 1);
+            dump(n->body, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_BREAK:
+            printf("(break)\n");
+            break;
+        case ND_CONTINUE:
+            printf("(continue)\n");
+            break;
+        case ND_PASS:
+            printf("(pass)\n");
+            break;
+        case ND_PRINT:
+            printf("(print\n");
+            dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_BLOCK:
             printf("(block\n");
             for (Node *s = n->body; s; s = s->next) dump(s, depth + 1);

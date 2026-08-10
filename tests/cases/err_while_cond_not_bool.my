@@ -1,0 +1,4 @@
+# ERROR: while の条件には bool が必要です
+while 1:
+    print(1)
+0

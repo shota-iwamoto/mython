@@ -1,5 +1,7 @@
 #include "parser.h"
 
+#include <string.h>
+
 #include "diag.h"
 
 // ── パーサの状態 ────────────────────────────────────────────
@@ -73,18 +75,43 @@ static Token *expect_close(Parser *p, const char *close, Token *open) {
     diag_fail(&d);
 }
 
-// 【第4章で追加する予定】トークン種別を指定して要求する版：
+// トークン種別を指定して要求する。
 //
-//     static Token *expect(Parser *p, TokenKind kind, const char *what) {
-//         Token *t = peek(p);
-//         if (t->kind != kind)
-//             error_at(t, "%s が必要です（実際は %s）", what,
-//                      token_kind_name(t->kind));
-//         return advance(p);
-//     }
+// ★ 第4章で「必要になる」と予告しておいた関数です。
+//   NEWLINE / INDENT / DEDENT を要求する block() のために実装しました。
 //
-// NEWLINE / INDENT / DEDENT を要求するときに必要になります。
-// 今は記号版だけで足りるので、未使用警告を避けてコメントにしてあります。
+// ⚠️ 仮想トークンの名前（INDENT）をそのままユーザーに見せないこと。
+//    「INDENT が必要です」では利用者に意味が伝わりません。
+//    what と hint には人間の言葉を渡します。
+// トークン種別の日本語名。
+// ⚠️ token_kind_name() は "INDENT" のような内部名を返すので、
+//    利用者に見せる診断ではこちらを使います。
+static const char *tok_kind_ja(TokenKind kind) {
+    switch (kind) {
+        case TK_EOF: return "ファイルの終わり";
+        case TK_INT: return "整数";
+        case TK_PUNCT: return "記号";
+        case TK_IDENT: return "名前";
+        case TK_KEYWORD: return "予約語";
+        case TK_NEWLINE: return "改行";
+        case TK_INDENT: return "字下げ";
+        case TK_DEDENT: return "字下げの終わり";
+        default: UNREACHABLE();
+    }
+}
+
+static Token *expect(Parser *p, TokenKind kind, const char *what,
+                     const char *hint) {
+    Token *t = peek(p);
+    if (t->kind == kind) return advance(p);
+
+    Diag d = {0};
+    d.message = diag_fmt("%sが必要です", what);
+    d.primary.tok = t;
+    d.primary.label = diag_fmt("ここは%sです", tok_kind_ja(t->kind));
+    d.hint = hint;
+    diag_fail(&d);
+}
 
 // ── 文法規則（優先順位の階層）─────────────────────────────────
 //
@@ -430,7 +457,35 @@ static int aug_op(Token *t) {
 //
 //   こうすると xs[0] = 1 や p.f = 1（第10章・第12章）にも
 //   そのまま対応できます。左辺を読み切るまで代入かどうか判らないからです。
+// print_stmt ::= "print" "(" expr ")"
+//
+// ⚠️ 暫定実装です。言語仕様では print は組み込み「関数」ですが、
+//    関数呼び出しの構文は第8章、str 型は第9章なので、
+//    この章では「文」として特別扱いします（第1章の暫定 main と同じ足場）。
+static Node *print_stmt(Parser *p) {
+    Token *t = advance(p);     // "print"
+    Token *open = advance(p);  // "("
+
+    Node *n = new_node(ND_PRINT, t);
+    n->lhs = expr(p);
+    expect_close(p, ")", open);
+    return n;
+}
+
 static Node *simple_stmt(Parser *p) {
+    Token *t0 = peek(p);
+
+    // break / continue / pass
+    if (tok_is_kw(t0, "break")) { advance(p); return new_node(ND_BREAK, t0); }
+    if (tok_is_kw(t0, "continue")) { advance(p); return new_node(ND_CONTINUE, t0); }
+    if (tok_is_kw(t0, "pass")) { advance(p); return new_node(ND_PASS, t0); }
+
+    // print( ... ) は暫定の組み込み文。
+    // print は予約語ではないので、IDENT "print" の次が '(' かで判定します（2 トークン先読み）。
+    if (t0->kind == TK_IDENT && strcmp(t0->text, "print") == 0 &&
+        tok_is(peek_at(p, 1), "("))
+        return print_stmt(p);
+
     // IDENT の次が ':' なら変数宣言。2 トークン先読みで判別する。
     if (peek(p)->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) return var_decl(p);
 
@@ -467,10 +522,110 @@ static Node *simple_stmt(Parser *p) {
     return n;
 }
 
-// stmt ::= simple_stmt NEWLINE
+// ブロックを開く ':' を要求する
+static void expect_colon(Parser *p, const char *what) {
+    if (consume(p, ":")) return;
+
+    Diag d = {0};
+    d.message = diag_fmt("%sの後に ':' が必要です", what);
+    d.primary.tok = peek(p);
+    d.primary.label = "ここに ':' が必要です";
+    d.hint = "ブロックを開く行は ':' で終わり、次の行を字下げします";
+    diag_fail(&d);
+}
+
+static Node *stmt(Parser *p);
+
+// block ::= NEWLINE INDENT stmt { stmt } DEDENT
 //
-// 第7章で if / while、第8章で return と def が加わります。
+// ★ 第4章で字句解析器に合成させた仮想トークンを、ここで初めて消費します。
+//   波括弧言語の "{" stmt { stmt } "}" とまったく同じ形になっているのが要点です。
+//   オフサイドルールの複雑さは、すべて字句解析器の中に閉じ込められています。
+static Node *block(Parser *p) {
+    Token *head_tok = peek(p);
+
+    expect(p, TK_NEWLINE, "改行", "':' の後は改行してブロックを字下げしてください");
+    expect(p, TK_INDENT, "字下げされたブロック",
+           "':' の次の行は字下げしてください（スペース 4 個を推奨）");
+
+    Node head = {0};
+    Node *cur = &head;
+    // ⚠️ TK_EOF も終了条件に入れる。字句解析器は末尾で DEDENT を必ず出すので
+    //    理屈の上では到達しませんが、入れておかないと万一のとき無限ループになります。
+    while (peek(p)->kind != TK_DEDENT && peek(p)->kind != TK_EOF) {
+        cur->next = stmt(p);
+        cur = cur->next;
+    }
+    expect(p, TK_DEDENT, "ブロックの終わり", NULL);
+
+    Node *blk = new_node(ND_BLOCK, head_tok);
+    blk->body = head.next;
+    return blk;
+}
+
+// if_stmt ::= "if" expr ":" block { "elif" expr ":" block } [ "else" ":" block ]
+//
+// ★ elif は「else の中に if が 1 個ある」形に脱糖します。
+//
+//     if a:   A          if a:  A
+//     elif b: B    →     else:
+//     else:   C              if b: B
+//                            else: C
+//
+//   ND_ELIF のようなノードが不要になり、意味解析もコード生成も
+//   「if は 2 分岐」だけを扱えば済みます。
+//   第5章の複合代入（x += e → x = x + e）と同じ発想です。
+static Node *if_stmt(Parser *p) {
+    // 先頭は "if"（stmt から呼ばれたとき）か "elif"（自分自身から呼ばれたとき）。
+    // どちらも「条件 ':' ブロック」という同じ構造なので、同じ関数で読めます。
+    Token *t = advance(p);
+
+    Node *n = new_node(ND_IF, t);
+    n->lhs = expr(p);
+    expect_colon(p, "if の条件");
+    n->body = block(p);
+
+    if (tok_is_kw(peek(p), "elif")) {
+        n->els = if_stmt(p);  // ★ 再帰 1 行で elif が何個でも繋がる
+    } else if (consume_kw(p, "else")) {
+        expect_colon(p, "'else'");
+        n->els = block(p);
+    }
+    return n;
+}
+
+// while_stmt ::= "while" expr ":" block
+static Node *while_stmt(Parser *p) {
+    Token *t = advance(p);  // "while"
+
+    Node *n = new_node(ND_WHILE, t);
+    n->lhs = expr(p);
+    expect_colon(p, "while の条件");
+    n->body = block(p);
+    return n;
+}
+
+// stmt ::= simple_stmt NEWLINE | if_stmt | while_stmt
+//
+// 第8章で return と def が加わります。
 static Node *stmt(Parser *p) {
+    Token *t = peek(p);
+
+    if (tok_is_kw(t, "if")) return if_stmt(p);
+    if (tok_is_kw(t, "while")) return while_stmt(p);
+
+    // 対応する if が無い elif / else。
+    // 放っておいても primary() の「予約語は変数名として使えません」に
+    // 捕まりますが、それでは何が悪いのか分かりません。
+    if (tok_is_kw(t, "elif") || tok_is_kw(t, "else")) {
+        Diag d = {0};
+        d.message = diag_fmt("対応する if がない '%s' です", t->text);
+        d.primary.tok = t;
+        d.primary.label = "この行に対応する 'if' が見つかりません";
+        d.hint = "'elif' / 'else' は 'if' と同じ字下げの位置に書いてください";
+        diag_fail(&d);
+    }
+
     Node *s = simple_stmt(p);
     expect_newline(p);
     return s;

@@ -1,0 +1,6 @@
+# OUTPUT: 2
+if False:
+    print(1)
+else:
+    print(2)
+0

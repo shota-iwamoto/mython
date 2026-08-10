@@ -1,0 +1,5 @@
+# ERROR: if の条件の後に ':' が必要です
+# ERROR: ここに ':' が必要です
+if True
+    print(1)
+0

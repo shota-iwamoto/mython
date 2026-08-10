@@ -1,0 +1,4 @@
+# ERROR: print はまだ 'bool' 型を出力できません
+# ERROR: = ヒント: 第7章の print は int 専用の暫定実装です
+print(True)
+0

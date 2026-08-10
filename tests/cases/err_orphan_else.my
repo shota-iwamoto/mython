@@ -1,0 +1,6 @@
+# ERROR: 対応する if がない 'else' です
+# ERROR: この行に対応する 'if' が見つかりません
+x: int = 1
+else:
+    print(1)
+0

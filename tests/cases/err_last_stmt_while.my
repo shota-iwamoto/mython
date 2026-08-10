@@ -1,0 +1,4 @@
+# ERROR: プログラムの最後は式でなければなりません
+# ERROR: この文は値を持ちません
+while False:
+    print(1)

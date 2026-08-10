@@ -27,8 +27,18 @@ typedef enum {
     ND_VARDECL,  // 変数宣言 x: T = e → name, type_name, rhs
     ND_ASSIGN,   // 代入 x = e   → lhs（ND_VAR）, rhs
     ND_BLOCK,    // 文のリスト   → body（next で連結）
-    // ── 第7章以降で追加していく ──
-    // ND_CALL, ND_IF, ND_WHILE, ND_RETURN, ND_FUNC, ...
+
+    // ── 第7章：制御構文 ──
+    ND_IF,        // if 文    → lhs（条件）, body（then）, els（else）
+    ND_WHILE,     // while 文 → lhs（条件）, body
+    ND_BREAK,     // break
+    ND_CONTINUE,  // continue
+    ND_PASS,      // pass（何もしない）
+    ND_PRINT,     // print(e) → lhs
+                  // ⚠️ 暫定。第8章で本物の関数呼び出しに置き換わります。
+
+    // ── 第8章以降で追加していく ──
+    // ND_CALL, ND_RETURN, ND_FUNC, ...
 } NodeKind;
 
 // 演算子の種類。
@@ -99,6 +109,19 @@ struct Node {
     //   ND_VAR / ND_VARDECL : 変数名
     char *name;
 
+    // LLVM 上の名前（%x, %x.1, ...）。★ 意味解析パスが割り当てます。
+    //
+    // 🤔 なぜ name をそのまま使わないのか（第7章）
+    //   第5章では「シャドーイング禁止なので変数名は一意」でしたが、
+    //   ブロックスコープが入ると兄弟スコープが同じ名前を使えます。
+    //     if a:
+    //         x: int = 1      ← %x
+    //     if b:
+    //         x: int = 2      ← %x（衝突！）
+    //   どちらも相手を隠していないのでシャドーイングではありません。
+    //   そこで sema が衝突しない名前を割り当てます（名前修飾の入口）。
+    char *ir_name;
+
     // 型注釈に書かれた名前（ND_VARDECL）。
     // 「int」のような文字列で、sema が Type * に解決します。
     //
@@ -114,7 +137,12 @@ struct Node {
     Node *lhs, *rhs;
 
     // ND_BLOCK の中身（先頭の文）。以降は next でたどります。
+    // ND_IF の then 節、ND_WHILE の本体もここです。
     Node *body;
+
+    // ND_IF の else 節（第7章）。
+    // elif は「else の中の if」に脱糖するので、ND_BLOCK か ND_IF が入ります。
+    Node *els;
 
     // ── 兄弟ノード ──
     //

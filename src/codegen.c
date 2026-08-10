@@ -34,7 +34,24 @@ typedef struct {
     int tmp_counter;    // 一時値 %tN の連番
     int label_counter;  // ラベルの連番（同名ラベルの衝突を防ぐ）
     bool terminated;    // 現在の基本ブロックが終端命令を出力済みか（規約 R6）
+
+    // 現在のループ（break / continue の飛び先）。第7章
+    struct LoopCtx *loop;
+
+    bool printf_declared;  // printf の declare を出したか（第7章）
 } Emitter;
+
+// break / continue の飛び先（規約 6.5）。
+//
+// ★ スタック変数として持つのがポイントです。gen_while の呼び出しがネストすれば、
+//   C の呼び出しスタックがそのままループのネストになります。
+//   自前でスタック構造を作る必要はありません。
+typedef struct LoopCtx LoopCtx;
+struct LoopCtx {
+    LoopCtx *outer;
+    const char *break_label;     // while.end.N
+    const char *continue_label;  // while.cond.N
+};
 
 // 新しい一時値の名前を返す（"%t0", "%t1", ...）
 //
@@ -188,6 +205,19 @@ static void emit_cond_br(Emitter *e, const char *cond, const char *then_l,
     e->terminated = true;
 }
 
+// 終端済みのブロックの後ろにコードを置く必要が出たら、
+// 到達不能ブロックのラベルを作る（規約 R7）。
+//
+//     while True:
+//         break
+//         print(1)     ← 到達不能。ラベルが無いと命令を置けない
+static void ensure_block(Emitter *e) {
+    if (!e->terminated) return;
+    char l[24];
+    snprintf(l, sizeof(l), "dead.%d", e->label_counter++);
+    emit_label(e, l);  // 終端済みなので br は補われない
+}
+
 // ── 式の生成 ────────────────────────────────────────────────
 //
 // gen_expr の約束：
@@ -241,7 +271,8 @@ static char *gen_expr(Emitter *e, Node *n) {
 
         case ND_VAR:
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
-            return gen_load(e, n->type, var_ptr(n->name));
+            // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
+            return gen_load(e, n->type, var_ptr(n->ir_name));
 
         case ND_UNARY: {
             char *v = gen_expr(e, n->lhs);
@@ -320,23 +351,126 @@ static char *gen_logical(Emitter *e, Node *n) {
     return gen_load(e, ty_bool, res);
 }
 
+// ── 制御構文の生成（規約 6.3 / 6.4 / 6.5）──────────────────
+
+static char *gen_stmt(Emitter *e, Node *n);
+
+static void gen_if(Emitter *e, Node *n) {
+    int id = e->label_counter++;  // ★ 番号は最初に 1 回だけ確保する
+
+    char then_l[32], else_l[32], end_l[32];
+    snprintf(then_l, sizeof(then_l), "if.then.%d", id);
+    snprintf(else_l, sizeof(else_l), "if.else.%d", id);
+    snprintf(end_l, sizeof(end_l), "if.end.%d", id);
+
+    char *cond = gen_expr(e, n->lhs);
+    // else が無ければ else ブロックを作らず、直接 end へ分岐する
+    emit_cond_br(e, cond, then_l, n->els ? else_l : end_l);
+
+    emit_label(e, then_l);
+    gen_stmt(e, n->body);
+    // ⚠️ then 節が break / continue で終わっていたら、そこは既に終端済み。
+    //    もう 1 つ br を出すと「1 ブロックに終端命令が 2 つ」になり LLVM が怒ります。
+    if (!e->terminated) emit_br(e, end_l);
+
+    if (n->els) {
+        emit_label(e, else_l);
+        gen_stmt(e, n->els);
+        if (!e->terminated) emit_br(e, end_l);
+    }
+
+    emit_label(e, end_l);
+}
+
+static void gen_while(Emitter *e, Node *n) {
+    int id = e->label_counter++;
+
+    char cond_l[32], body_l[32], end_l[32];
+    snprintf(cond_l, sizeof(cond_l), "while.cond.%d", id);
+    snprintf(body_l, sizeof(body_l), "while.body.%d", id);
+    snprintf(end_l, sizeof(end_l), "while.end.%d", id);
+
+    // ⚠️ 条件ブロックに「入る」ための br が必要（規約 6.4）。
+    //    条件を独立したブロックにしないと 1 回目の判定が飛ばされ、
+    //    do-while になってしまいます。
+    emit_br(e, cond_l);
+
+    emit_label(e, cond_l);
+    char *cond = gen_expr(e, n->lhs);  // ★ 条件は反復のたびに評価される
+    emit_cond_br(e, cond, body_l, end_l);
+
+    // break / continue の飛び先を積む
+    LoopCtx ctx = {.outer = e->loop, .break_label = end_l, .continue_label = cond_l};
+    e->loop = &ctx;
+
+    emit_label(e, body_l);
+    gen_stmt(e, n->body);
+    if (!e->terminated) emit_br(e, cond_l);  // ループバック
+
+    e->loop = ctx.outer;  // ★ 対で戻す
+
+    emit_label(e, end_l);
+}
+
+// print(e) の暫定実装。C の printf を借ります。
+//
+// ★ 第1章で用意した globals / decls バッファが、ここで初めて使われます。
+static void gen_print(Emitter *e, Node *n) {
+    // 書式文字列と declare は、最初に print が現れたときに 1 回だけ出す
+    if (!e->printf_declared) {
+        // ⚠️ [6 x i8] の 6 は "%lld\n\0" のバイト数。数え間違えると壊れます。
+        sb_printf(&e->globals,
+                  "@.fmt.int = private unnamed_addr constant [6 x i8] "
+                  "c\"%%lld\\0A\\00\"\n");
+        sb_printf(&e->decls, "declare i32 @printf(ptr noundef, ...)\n");
+        e->printf_declared = true;
+    }
+
+    char *v = gen_expr(e, n->lhs);
+    char *t = new_tmp(e);
+    // ⚠️ 可変長引数の呼び出しには関数型 (ptr, ...) を書く必要があります。
+    sb_printf(&e->fn, "  %s = call i32 (ptr, ...) @printf(ptr @.fmt.int, i64 %s)\n",
+              t, v);
+}
+
 // ── 文の生成 ────────────────────────────────────────────────
 //
 // 文は「値を返さない」ので、gen_expr とは別の関数にします。
 // ただし式文だけは値を持つので、その値を返します
 // （プログラムの値＝最後の式文の値、という暫定仕様のため）。
 static char *gen_stmt(Emitter *e, Node *n) {
+    // 終端済みブロックの後ろに来たら、到達不能ブロックを開く（規約 R7）
+    ensure_block(e);
+
     switch (n->kind) {
+        case ND_BLOCK: {
+            char *last = NULL;
+            for (Node *st = n->body; st; st = st->next) {
+                char *v = gen_stmt(e, st);
+                if (v) last = v;
+            }
+            return last;
+        }
+
+        case ND_IF: gen_if(e, n); return NULL;
+        case ND_WHILE: gen_while(e, n); return NULL;
+        case ND_PRINT: gen_print(e, n); return NULL;
+        case ND_PASS: return NULL;  // 本当に何も出さない
+
+        // 飛び先は sema が保証している（ループの外なら検査で弾かれる）
+        case ND_BREAK: emit_br(e, e->loop->break_label); return NULL;
+        case ND_CONTINUE: emit_br(e, e->loop->continue_label); return NULL;
+
         case ND_VARDECL: {
             // alloca は entry ブロックに出済み（規約 R1）。ここでは store だけ。
             char *val = gen_expr(e, n->rhs);
-            gen_store(e, n->type, val, var_ptr(n->name));
+            gen_store(e, n->type, val, var_ptr(n->ir_name));
             return NULL;
         }
 
         case ND_ASSIGN: {
             char *val = gen_expr(e, n->rhs);
-            gen_store(e, n->type, val, var_ptr(n->lhs->name));
+            gen_store(e, n->type, val, var_ptr(n->lhs->ir_name));
             return NULL;
         }
 
@@ -359,12 +493,15 @@ static void collect_allocas(Emitter *e, Node *n) {
     if (!n) return;
 
     if (n->kind == ND_VARDECL)
-        sb_printf(&e->allocas, "  %s = alloca %s\n", var_ptr(n->name),
+        sb_printf(&e->allocas, "  %s = alloca %s\n", var_ptr(n->ir_name),
                   llvm_mem_type(n->type));  // ★ bool は i8（規約 R5）
 
-    // 子と兄弟をたどる
+    // 子と兄弟をたどる。
+    // ★ 第5章で「再帰なので第7章でブロックが入っても勝手に見つかる」と
+    //   書いたとおりになりました。else 節の分だけ 1 行足せば済みます。
     collect_allocas(e, n->lhs);
     collect_allocas(e, n->rhs);
+    collect_allocas(e, n->els);
     for (Node *s = n->body; s; s = s->next) collect_allocas(e, s);
 }
 
@@ -379,6 +516,7 @@ static void gen_mython_main(Emitter *e, Node *ast) {
     e->tmp_counter = 0;
     e->label_counter = 0;
     e->terminated = false;
+    e->loop = NULL;
     sb_init(&e->allocas);
     sb_init(&e->fn);
 
