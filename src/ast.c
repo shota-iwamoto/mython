@@ -133,8 +133,36 @@ static void dump(Node *n, int depth) {
         case ND_VAR:
             printf("(var %s)\n", n->name);
             break;
+        case ND_TYPEREF:
+            if (!n->lhs) { printf("(type %s)\n", n->name); break; }
+            printf("(type %s\n", n->name);
+            dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_LIST:
+            printf("(list\n");
+            for (Node *el = n->body; el; el = el->next) dump(el, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_INDEX:
+            printf("(index\n");
+            dump(n->lhs, depth + 1);
+            dump(n->rhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_METHOD:
+            printf("(method %s\n", n->name);
+            dump(n->lhs, depth + 1);
+            for (Node *a = n->args; a; a = a->next) dump(a, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_VARDECL:
-            printf("(vardecl %s %s\n", n->name, n->type_name);
+            printf("(vardecl %s\n", n->name);
+            dump(n->type_ref, depth + 1);
             dump(n->rhs, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
@@ -177,14 +205,18 @@ static void dump(Node *n, int depth) {
             printf(")\n");
             break;
         case ND_FUNC:
-            printf("(func %s -> %s\n", n->name, n->type_name);
+            printf("(func %s\n", n->name);
+            dump(n->type_ref, depth + 1);
             for (Node *pm = n->params; pm; pm = pm->next) dump(pm, depth + 1);
             dump(n->body, depth + 1);
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
         case ND_PARAM:
-            printf("(param %s %s)\n", n->name, n->type_name);
+            printf("(param %s\n", n->name);
+            dump(n->type_ref, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
             break;
         case ND_CALL:
             printf("(call %s\n", n->name);

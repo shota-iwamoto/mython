@@ -22,12 +22,23 @@ void types_init(void) {
     ty_str = new_type(TY_STR);
 }
 
+Type *type_list(Type *elem) {
+    Type *t = new_type(TY_LIST);
+    t->elem = elem;
+    return t;
+}
+
 bool type_equal(Type *a, Type *b) {
     // シングルトンなので、プリミティブ型どうしはここで済む
     if (a == b) return true;
     if (a->kind != b->kind) return false;
 
-    // 第10章：list[T] なら要素型を再帰比較する
+    // ★ 第10章：複合型は中身まで見る。
+    //   list[int] と list[str] はどちらも kind == TY_LIST なので、
+    //   ここが無いと「同じ型」と判定されてしまいます
+    //   （第5章のコメントで予告していた穴）。
+    if (a->kind == TY_LIST) return type_equal(a->elem, b->elem);
+
     // 第12章：class なら定義の同一性で比較する
     return true;
 }
@@ -38,6 +49,14 @@ const char *type_name(Type *t) {
         case TY_BOOL: return "bool";
         case TY_NONE: return "None";
         case TY_STR: return "str";
+        case TY_LIST: {
+            // ⚠️ 動的に組み立てるので、返り値は毎回新しい文字列になります。
+            //    解放しない方針（メモリモデル 3 節）なので問題ありません。
+            StrBuf sb;
+            sb_init(&sb);
+            sb_printf(&sb, "list[%s]", type_name(t->elem));
+            return sb_str(&sb);
+        }
         default: UNREACHABLE();
     }
 }
@@ -60,4 +79,4 @@ Type *type_from_kind(int kind) {
     }
 }
 
-const char *type_name_list(void) { return "int, bool, str, None"; }
+const char *type_name_list(void) { return "int, bool, str, None, list[T]"; }

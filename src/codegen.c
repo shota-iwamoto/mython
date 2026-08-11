@@ -91,6 +91,7 @@ static const char *llvm_type(Type *t) {
         case TY_BOOL: return "i1";   // レジスタ上は 1 ビット
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
+        case TY_LIST: return "ptr";   // MyList へのポインタ（第10章）
         default: UNREACHABLE();
     }
 }
@@ -105,6 +106,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_INT: return "i64";
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
+        case TY_LIST: return "ptr"; // 第10章
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -297,6 +299,9 @@ static void declare_rt(Emitter *e, const char *sig) {
 // 呼び出し側で場合分けが不要になります。
 static char *gen_logical(Emitter *e, Node *n);
 static char *gen_call(Emitter *e, Node *n);
+static char *gen_list_lit(Emitter *e, Node *n);
+static char *gen_index(Emitter *e, Node *n);
+static char *gen_method(Emitter *e, Node *n);
 
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
@@ -383,6 +388,15 @@ static char *gen_expr(Emitter *e, Node *n) {
         case ND_CALL:
             return gen_call(e, n);
 
+        case ND_LIST:
+            return gen_list_lit(e, n);
+
+        case ND_INDEX:
+            return gen_index(e, n);
+
+        case ND_METHOD:
+            return gen_method(e, n);
+
         case ND_VAR:
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
             // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
@@ -465,6 +479,115 @@ static char *gen_logical(Emitter *e, Node *n) {
     return gen_load(e, ty_bool, res);
 }
 
+// ── list[T] の生成（第10章）────────────────────────────────
+//
+// ★ 要素はすべて 8 バイト。i64 で持つか、ポインタで持つかの 2 通りだけです。
+static bool elem_is_ptr(Type *elem) {
+    return elem->kind == TY_STR || elem->kind == TY_LIST;
+}
+
+// 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
+static char *elem_to_slot(Emitter *e, Type *elem, char *v) {
+    if (elem->kind != TY_BOOL) return v;
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = zext i1 %s to i64\n", t, v);
+    return t;
+}
+
+// ランタイムから受け取った値を「Mython の値」に戻す（bool は i1 に縮める）
+static char *slot_to_elem(Emitter *e, Type *elem, char *v) {
+    if (elem->kind != TY_BOOL) return v;
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = trunc i64 %s to i1\n", t, v);
+    return t;
+}
+
+static const char *slot_ty(Type *elem) { return elem_is_ptr(elem) ? "ptr" : "i64"; }
+
+// [1, 2, 3] は「空リストを作って append を繰り返す」に脱糖する。
+// ★ 第5章の複合代入、第7章の elif と同じ「脱糖」の手です。
+static char *gen_list_lit(Emitter *e, Node *n) {
+    Type *elem = n->type->elem;
+
+    declare_rt(e, "ptr @my_list_new()");
+    char *l = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @my_list_new()\n", l);
+
+    const char *sty = slot_ty(elem);
+    const char *push = elem_is_ptr(elem) ? "my_list_push_ptr" : "my_list_push_i64";
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "void @%s(ptr, %s)", push, sty);
+    declare_rt(e, sb_str(&sig));
+
+    for (Node *el = n->body; el; el = el->next) {
+        char *v = elem_to_slot(e, elem, gen_expr(e, el));
+        sb_printf(&e->fn, "  call void @%s(ptr %s, %s %s)\n", push, l, sty, v);
+    }
+    return l;
+}
+
+static char *gen_index(Emitter *e, Node *n) {
+    Type *ot = n->lhs->type;
+    char *obj = gen_expr(e, n->lhs);
+    char *idx = gen_expr(e, n->rhs);
+
+    // str の添字は 1 文字の str を返す（型システム 5.8）
+    if (ot->kind == TY_STR) {
+        declare_rt(e, "ptr @my_str_index(ptr, i64)");
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call ptr @my_str_index(ptr %s, i64 %s)\n", t, obj,
+                  idx);
+        return t;
+    }
+
+    Type *elem = ot->elem;
+    const char *sty = slot_ty(elem);
+    const char *get = elem_is_ptr(elem) ? "my_list_get_ptr" : "my_list_get_i64";
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "%s @%s(ptr, i64)", sty, get);
+    declare_rt(e, sb_str(&sig));
+
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call %s @%s(ptr %s, i64 %s)\n", t, sty, get, obj, idx);
+    return slot_to_elem(e, elem, t);
+}
+
+static void gen_index_store(Emitter *e, Node *target, char *val) {
+    Type *elem = target->lhs->type->elem;
+    char *obj = gen_expr(e, target->lhs);
+    char *idx = gen_expr(e, target->rhs);
+
+    const char *sty = slot_ty(elem);
+    const char *set = elem_is_ptr(elem) ? "my_list_set_ptr" : "my_list_set_i64";
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "void @%s(ptr, i64, %s)", set, sty);
+    declare_rt(e, sb_str(&sig));
+
+    char *v = elem_to_slot(e, elem, val);
+    sb_printf(&e->fn, "  call void @%s(ptr %s, i64 %s, %s %s)\n", set, obj, idx, sty,
+              v);
+}
+
+static char *gen_method(Emitter *e, Node *n) {
+    // 今のところ list.append だけ（sema が保証している）
+    Type *elem = n->lhs->type->elem;
+    char *obj = gen_expr(e, n->lhs);
+
+    const char *sty = slot_ty(elem);
+    const char *push = elem_is_ptr(elem) ? "my_list_push_ptr" : "my_list_push_i64";
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "void @%s(ptr, %s)", push, sty);
+    declare_rt(e, sb_str(&sig));
+
+    char *v = elem_to_slot(e, elem, gen_expr(e, n->args));
+    sb_printf(&e->fn, "  call void @%s(ptr %s, %s %s)\n", push, obj, sty, v);
+    return NULL;
+}
+
 // ── 制御構文の生成（規約 6.3 / 6.4 / 6.5）──────────────────
 
 static char *gen_stmt(Emitter *e, Node *n);
@@ -535,7 +658,9 @@ static void gen_while(Emitter *e, Node *n) {
 //   「どの実装を呼ぶか」の判断は sema 側で終わっています。
 static char *gen_builtin_call(Emitter *e, Node *n) {
     const Builtin *b = n->builtin;
-    Type *at = type_from_kind(b->arg);
+    // ⚠️ 引数の型は表からではなく実引数から取ります。
+    //    list[T] にはシングルトンが無いので type_from_kind では引けません（第10章）。
+    Type *at = n->args->type;
     Type *rt = type_from_kind(b->ret);
 
     // ⚠️ bool は Mython のレジスタ上では i1 ですが、C 側は long long で
@@ -639,6 +764,11 @@ static char *gen_stmt(Emitter *e, Node *n) {
 
         case ND_ASSIGN: {
             char *val = gen_expr(e, n->rhs);
+            // 添字への代入 xs[i] = v（第10章）
+            if (n->lhs->kind == ND_INDEX) {
+                gen_index_store(e, n->lhs, val);
+                return NULL;
+            }
             gen_store(e, n->type, val, n->lhs->ir_name);
             return NULL;
         }

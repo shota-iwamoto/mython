@@ -44,8 +44,14 @@ typedef enum {
     ND_CALL,    // 呼び出し → name, args
     ND_RETURN,  // return   → lhs（値なしなら NULL）
 
-    // ── 第9章以降で追加していく ──
-    // ND_STR, ND_INDEX, ND_FIELD, ND_CLASS, ...
+    // ── 第10章：list[T] ──
+    ND_TYPEREF,  // 型注釈    → name, lhs（要素型の型注釈。無ければ NULL）
+    ND_LIST,     // [1, 2, 3] → body（要素。next で連結）
+    ND_INDEX,    // xs[i]     → lhs（対象）, rhs（添字）
+    ND_METHOD,   // xs.f(...) → lhs（対象）, name, args
+
+    // ── 第12章以降で追加していく ──
+    // ND_FIELD, ND_CLASS, ...
 } NodeKind;
 
 // 演算子の種類。
@@ -136,7 +142,11 @@ struct Node {
     // グローバルは alloca せず、@g.x を直接読み書きします。
     bool is_global;
 
-    // 型注釈に書かれた名前（ND_VARDECL）。
+    // 型注釈の木（ND_VARDECL / ND_PARAM / ND_FUNC）。第10章。
+    // ★ list[list[int]] のように入れ子になるので、文字列 1 個では表せません。
+    Node *type_ref;
+
+    // 型注釈に書かれた名前（ND_TYPEREF）。
     // 「int」のような文字列で、sema が Type * に解決します。
     //
     // 🤔 なぜ parser が Type * に解決しないのか

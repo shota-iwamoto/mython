@@ -1,5 +1,5 @@
 # ERROR: この式には代入できません
-# ERROR: 代入先にできるのは変数だけです
+# ERROR: 代入先にできるのは変数と添字 xs[i] だけです
 def main() -> int:
     1 = 2
     return 0

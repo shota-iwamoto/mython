@@ -63,6 +63,14 @@ typedef struct {
     UsedName *used;    // 割り当て済みの IR 名（関数ごとにリセット）
     FuncSig *funcs;    // 関数表（第8章）
     FuncSig *cur_func; // 今どの関数を検査中か（return の検査に必要）
+
+    // 今この式に期待されている型（第10章）。
+    //
+    // ★ 空リスト [] だけは、それ自身から要素型が決まりません。
+    //   本格的なやり方は双方向型検査（期待型を引数で渡す）ですが、
+    //   v1 で期待型を必要とする式は [] だけなので、状態を 1 つ持たせて済ませます。
+    // ⚠️ 期待型が要る式が増えたら、この手は破綻します。そのときは引数で渡す形に直します。
+    Type *expected;
 } Sema;
 
 static FuncSig *lookup_func(Sema *s, const char *name) {
@@ -168,6 +176,41 @@ static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
 static Type *check_expr(Sema *s, Node *n);
 
 static Type *check_call(Sema *s, Node *n);
+static Type *check_list_lit(Sema *s, Node *n);
+static Type *check_index_expr(Sema *s, Node *n);
+static Type *check_method(Sema *s, Node *n);
+
+// 型注釈（構文）を Type（意味）に変換する。
+//
+// ★ 「名前から型への解決は sema の仕事」（第5章の判断 #47）が、
+//   複合型になっても同じ形で通用します。
+static Type *resolve_type(Node *tr) {
+    if (strcmp(tr->name, "list") == 0) {
+        if (!tr->lhs)
+            error_at_hint(tr->tok, "要素型を書いてください（例: list[int]）",
+                          "list には要素型が必要です");
+        Type *elem = resolve_type(tr->lhs);  // ★ 再帰
+        if (elem->kind == TY_NONE)
+            error_at_hint(tr->tok, "None 型の値は存在しないので要素にできません",
+                          "list の要素型に None は使えません");
+        return type_list(elem);
+    }
+
+    if (tr->lhs)
+        error_at_hint(tr->tok, "要素型を取るのは list だけです",
+                      "型 '%s' は要素型を取りません", tr->name);
+
+    Type *t = type_from_name(tr->name);
+    if (!t) {
+        Diag d = {0};
+        d.message = diag_fmt("未知の型名 '%s' です", tr->name);
+        d.primary.tok = tr->tok;
+        d.primary.label = "この型は存在しません";
+        d.hint = diag_fmt("現在使える型: %s", type_name_list());
+        diag_fail(&d);
+    }
+    return t;
+}
 
 // 二項演算子が、その型に適用できるか
 static bool op_supports(OpKind op, Type *t) {
@@ -315,6 +358,9 @@ static Type *check_expr(Sema *s, Node *n) {
         case ND_BINOP: t = check_binop(s, n); break;
         case ND_LOGICAL: t = check_logical(s, n); break;
         case ND_CALL: t = check_call(s, n); break;
+        case ND_LIST: t = check_list_lit(s, n); break;
+        case ND_INDEX: t = check_index_expr(s, n); break;
+        case ND_METHOD: t = check_method(s, n); break;
         case ND_UNARY: t = check_unary(s, n); break;
         default: UNREACHABLE();
     }
@@ -327,16 +373,11 @@ static Type *check_expr(Sema *s, Node *n) {
 static void check_stmt(Sema *s, Node *n);
 
 static void check_vardecl(Sema *s, Node *n) {
-    // ① 型注釈の名前を解決する
-    Type *declared = type_from_name(n->type_name);
-    if (!declared) {
-        Diag d = {0};
-        d.message = diag_fmt("未知の型名 '%s' です", n->type_name);
-        d.primary.tok = n->tok;
-        d.primary.label = "この型は存在しません";
-        d.hint = diag_fmt("現在使える型: %s", type_name_list());
-        diag_fail(&d);
-    }
+    // ① 型注釈を解決する（第10章で木になった）
+    Type *declared = resolve_type(n->type_ref);
+    if (declared->kind == TY_NONE)
+        error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
+                      "変数の型に None は使えません");
 
     // ② 同じスコープでの再宣言を禁止（言語仕様 5.1）
     VarEntry *prev = lookup_local(s, n->name);
@@ -369,8 +410,11 @@ static void check_vardecl(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    // ③ 初期化式の型が宣言した型に代入できるか
+    // ③ 初期化式の型が宣言した型に代入できるか。
+    //    ★ 空リスト [] の要素型を決めるため、期待型を渡す（第10章）
+    s->expected = declared;
     Type *actual = check_expr(s, n->rhs);
+    s->expected = NULL;
     if (!type_equal(actual, declared)) {
         Diag d = {0};
         d.message = "型が一致しません";
@@ -393,6 +437,36 @@ static void check_vardecl(Sema *s, Node *n) {
 
 static void check_assign(Sema *s, Node *n) {
     Node *target = n->lhs;
+
+    // 添字への代入 xs[i] = v（第10章）
+    if (target->kind == ND_INDEX) {
+        Type *et = check_index_expr(s, target);
+        target->type = et;
+
+        // ⚠️ str は不変（immutable）なので s[0] = "x" は書けません（言語仕様 3.1）
+        if (target->lhs->type->kind == TY_STR)
+            error_at_hint(target->tok,
+                          "str は不変（immutable）です。新しい文字列を作ってください",
+                          "文字列の要素には代入できません");
+
+        s->expected = et;
+        Type *actual = check_expr(s, n->rhs);
+        s->expected = NULL;
+
+        if (!type_equal(actual, et)) {
+            Diag d = {0};
+            d.message = "型が一致しません";
+            d.primary.tok = n->rhs->tok;
+            d.primary.label = diag_fmt("型 '%s' の式", type_name(actual));
+            d.related.tok = target->tok;
+            d.related.label = diag_fmt("この要素は '%s' 型です", type_name(et));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+        n->type = et;
+        return;
+    }
+
     if (target->kind != ND_VAR) UNREACHABLE();  // parser が保証している
 
     VarEntry *v = lookup(s, target->name);
@@ -408,7 +482,9 @@ static void check_assign(Sema *s, Node *n) {
     target->type = v->type;
     target->ir_name = v->ir_name;
 
+    s->expected = v->type;  // ★ xs = [] のため（第10章）
     Type *actual = check_expr(s, n->rhs);
+    s->expected = NULL;
     if (!type_equal(actual, v->type)) {
         Diag d = {0};
         d.message = "型が一致しません";
@@ -454,6 +530,7 @@ const Builtin BUILTINS[] = {
     {"print", TY_STR, TY_NONE, "my_print_str"},
     {"print", TY_BOOL, TY_NONE, "my_print_bool"},
     {"len", TY_STR, TY_INT, "my_str_len"},
+    {"len", TY_LIST, TY_INT, "my_list_len"},  // 第10章（要素型は見ない）
     {"str", TY_INT, TY_STR, "my_str_from_int"},
     {"str", TY_BOOL, TY_STR, "my_str_from_bool"},
     {"int", TY_STR, TY_INT, "my_str_to_int"},
@@ -478,8 +555,11 @@ static const char *builtin_arg_types(const char *name) {
     bool first = true;
     for (int i = 0; BUILTINS[i].name; i++) {
         if (strcmp(BUILTINS[i].name, name) != 0) continue;
-        Type *t = type_from_kind(BUILTINS[i].arg);
-        sb_printf(&sb, "%s%s", first ? "" : ", ", type_name(t));
+        // list[T] にはシングルトンが無いので、表示用の名前を直接書く（第10章）
+        const char *nm = BUILTINS[i].arg == TY_LIST
+                             ? "list[T]"
+                             : type_name(type_from_kind(BUILTINS[i].arg));
+        sb_printf(&sb, "%s%s", first ? "" : ", ", nm);
         first = false;
     }
     return sb_str(&sb);
@@ -513,6 +593,116 @@ static Type *check_builtin_call(Sema *s, Node *n) {
     d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
     d.hint = diag_fmt("%s が受け取れるのは %s です", n->name,
                       builtin_arg_types(n->name));
+    diag_fail(&d);
+}
+
+// リストリテラルの検査（第10章）
+static Type *check_list_lit(Sema *s, Node *n) {
+    Type *want = s->expected;  // ★ 使う前に控える（下で check_expr が上書きするため）
+
+    if (!n->body) {
+        // 空リストは、それ自身から要素型が決まらない
+        if (!want || want->kind != TY_LIST) {
+            Diag d = {0};
+            d.message = "空のリストの要素型が決まりません";
+            d.primary.tok = n->tok;
+            d.primary.label = "この [] がどんなリストなのか分かりません";
+            d.hint = "型注釈を書いてください（例: xs: list[int] = []）。"
+                     "関数の引数に直接渡す場合は、いったん変数に入れてください";
+            diag_fail(&d);
+        }
+        return want;
+    }
+
+    // 要素があるなら、最初の要素の型を要素型にする（推論はしない）
+    s->expected = want && want->kind == TY_LIST ? want->elem : NULL;
+    Type *et = check_expr(s, n->body);
+
+    int i = 2;
+    for (Node *el = n->body->next; el; el = el->next, i++) {
+        s->expected = et;
+        Type *t = check_expr(s, el);
+        if (!type_equal(t, et)) {
+            Diag d = {0};
+            d.message = diag_fmt("リストの要素の型がそろっていません（第 %d 要素）", i);
+            d.primary.tok = el->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(t));
+            d.related.tok = n->body->tok;
+            d.related.label = diag_fmt("最初の要素は '%s' 型です", type_name(et));
+            d.hint = "リストの要素はすべて同じ型でなければなりません";
+            diag_fail(&d);
+        }
+    }
+    s->expected = NULL;
+    return type_list(et);
+}
+
+// 添字アクセスの検査（型システム 5.8）
+static Type *check_index_expr(Sema *s, Node *n) {
+    Type *ot = check_expr(s, n->lhs);
+    Type *it = check_expr(s, n->rhs);
+
+    if (it->kind != TY_INT) {
+        Diag d = {0};
+        d.message = "添字は int でなければなりません";
+        d.primary.tok = n->rhs->tok;
+        d.primary.label = diag_fmt("これは '%s' 型です", type_name(it));
+        diag_fail(&d);
+    }
+
+    if (ot->kind == TY_LIST) return ot->elem;
+    // ★ str の添字は 1 文字の str を返す（char 型は作らない。型システム 5.8）
+    if (ot->kind == TY_STR) return ty_str;
+
+    Diag d = {0};
+    d.message = diag_fmt("型 '%s' は添字を取れません", type_name(ot));
+    d.primary.tok = n->lhs->tok;
+    d.primary.label = diag_fmt("これは '%s' 型です", type_name(ot));
+    d.hint = "添字が使えるのは list[T] と str です";
+    diag_fail(&d);
+}
+
+// メソッド呼び出しの検査（第10章。今のところ list.append だけ）
+static Type *check_method(Sema *s, Node *n) {
+    Type *ot = check_expr(s, n->lhs);
+
+    if (ot->kind == TY_LIST && strcmp(n->name, "append") == 0) {
+        int nargs = 0;
+        for (Node *a = n->args; a; a = a->next) nargs++;
+        if (nargs != 1) {
+            Diag d = {0};
+            d.message = diag_fmt("append は 1 個の引数を取りますが、%d 個渡されました",
+                                 nargs);
+            d.primary.tok = n->tok;
+            d.primary.label = "引数の個数が違います";
+            d.hint = "xs.append(値) の形で使ってください";
+            diag_fail(&d);
+        }
+
+        s->expected = ot->elem;
+        Type *at = check_expr(s, n->args);
+        s->expected = NULL;
+
+        // ⚠️ ここでも type_equal()。list[list[int]] に list[str] を
+        //    append するのを弾くには、要素型の再帰比較が要ります。
+        if (!type_equal(at, ot->elem)) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' のリストに '%s' を追加できません",
+                                 type_name(ot->elem), type_name(at));
+            d.primary.tok = n->args->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+        return ty_none;
+    }
+
+    Diag d = {0};
+    d.message = diag_fmt("型 '%s' にメソッド '%s' はありません", type_name(ot),
+                         n->name);
+    d.primary.tok = n->tok;
+    d.primary.label = "このメソッドは存在しません";
+    d.hint = "今のところ使えるのは list[T] の append だけです";
     diag_fail(&d);
 }
 
@@ -585,7 +775,9 @@ static void check_return(Sema *s, Node *n) {
         return;
     }
 
+    s->expected = want;  // ★ return [] のため（第10章）
     Type *got = check_expr(s, n->lhs);
+    s->expected = NULL;
     if (want->kind == TY_NONE) {
         Diag d = {0};
         d.message = diag_fmt("戻り型が None の関数 '%s' は値を返せません",
@@ -702,15 +894,7 @@ static void declare_func(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    Type *ret = type_from_name(n->type_name);
-    if (!ret) {
-        Diag d = {0};
-        d.message = diag_fmt("未知の型名 '%s' です", n->type_name);
-        d.primary.tok = n->tok;
-        d.primary.label = "この戻り型は存在しません";
-        d.hint = diag_fmt("現在使える型: %s", type_name_list());
-        diag_fail(&d);
-    }
+    Type *ret = resolve_type(n->type_ref);
 
     int nparams = 0;
     for (Node *pm = n->params; pm; pm = pm->next) nparams++;
@@ -725,15 +909,7 @@ static void declare_func(Sema *s, Node *n) {
 
     int i = 0;
     for (Node *pm = n->params; pm; pm = pm->next, i++) {
-        Type *pt = type_from_name(pm->type_name);
-        if (!pt) {
-            Diag d = {0};
-            d.message = diag_fmt("未知の型名 '%s' です", pm->type_name);
-            d.primary.tok = pm->tok;
-            d.primary.label = "この型は存在しません";
-            d.hint = diag_fmt("現在使える型: %s", type_name_list());
-            diag_fail(&d);
-        }
+        Type *pt = resolve_type(pm->type_ref);
         if (pt->kind == TY_NONE)
             error_at_hint(pm->tok, "None 型の値は存在しないので引数にできません",
                           "引数の型に None は使えません");
@@ -749,15 +925,7 @@ static void declare_func(Sema *s, Node *n) {
 
 // グローバル変数の登録（言語仕様 6.2）
 static void declare_global(Sema *s, Node *n) {
-    Type *declared = type_from_name(n->type_name);
-    if (!declared) {
-        Diag d = {0};
-        d.message = diag_fmt("未知の型名 '%s' です", n->type_name);
-        d.primary.tok = n->tok;
-        d.primary.label = "この型は存在しません";
-        d.hint = diag_fmt("現在使える型: %s", type_name_list());
-        diag_fail(&d);
-    }
+    Type *declared = resolve_type(n->type_ref);
     if (declared->kind == TY_NONE)
         error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
                       "変数の型に None は使えません");

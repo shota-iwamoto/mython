@@ -142,6 +142,7 @@ static Token *expect(Parser *p, TokenKind kind, const char *what,
 static Node *expr(Parser *p);
 static Node *unary(Parser *p);
 static Token *type_name_token(Parser *p, const char *what);
+static Node *type_ref(Parser *p, const char *what);
 
 // primary ::= INT | "(" expr ")"
 static Node *primary(Parser *p) {
@@ -170,6 +171,29 @@ static Node *primary(Parser *p) {
     if (t->kind == TK_STR) {
         advance(p);
         return new_str_node(t, t->text, t->slen);
+    }
+
+    // リストリテラル [1, 2, 3]（第10章）。
+    //
+    // ★ '[' の意味は位置で決まります：式の先頭ならリテラル、
+    //   式の直後（postfix）なら添字。階層化された文法の副産物で、
+    //   特別な処理は要りません。
+    if (tok_is(t, "[")) {
+        advance(p);
+        Node *n = new_node(ND_LIST, t);
+        Node head = {0};
+        Node *cur = &head;
+        if (!tok_is(peek(p), "]")) {
+            for (;;) {
+                cur->next = expr(p);
+                cur = cur->next;
+                if (!consume(p, ",")) break;
+                if (tok_is(peek(p), "]")) break;  // 末尾のカンマを許す
+            }
+        }
+        expect_close(p, "]", t);
+        n->body = head.next;
+        return n;
     }
 
     // True / False は予約語だが、式として使える（値を持つリテラル）。
@@ -210,6 +234,49 @@ static Node *postfix(Parser *p) {
 
     for (;;) {
         Token *open = peek(p);
+
+        // 添字 xs[i]（第10章）
+        if (consume(p, "[")) {
+            Node *idx = new_node(ND_INDEX, open);
+            idx->lhs = n;
+            idx->rhs = expr(p);
+            expect_close(p, "]", open);
+            n = idx;
+            continue;
+        }
+
+        // メソッド呼び出し xs.append(v)（第10章）
+        if (consume(p, ".")) {
+            Token *name_tok = peek(p);
+            if (name_tok->kind != TK_IDENT)
+                error_at_hint(name_tok, "'.' の後にはメソッド名を書きます（例: xs.append(1)）",
+                              "メソッド名が必要です");
+            advance(p);
+
+            Token *mopen = peek(p);
+            if (!consume(p, "("))
+                error_at_hint(mopen, "フィールドへのアクセスは第12章で対応します",
+                              "メソッド呼び出しの '(' が必要です");
+
+            Node *m = new_node(ND_METHOD, name_tok);
+            m->lhs = n;
+            m->name = name_tok->text;
+
+            Node mhead = {0};
+            Node *mcur = &mhead;
+            if (!tok_is(peek(p), ")")) {
+                for (;;) {
+                    mcur->next = expr(p);
+                    mcur = mcur->next;
+                    if (!consume(p, ",")) break;
+                }
+            }
+            expect_close(p, ")", mopen);
+            m->args = mhead.next;
+            n = m;
+            continue;
+        }
+
         if (!consume(p, "(")) return n;
 
         // 呼べるのは名前だけ（第一級関数は v1 未対応）
@@ -460,7 +527,7 @@ static Node *var_decl(Parser *p) {
 
     // 型注釈。ここでは「名前を記録する」だけで、
     // それが有効な型かどうかの判断は sema に任せます。
-    Token *ty_tok = type_name_token(p, "型注釈には型名を書きます（例: x: int = 0）");
+    Node *tr = type_ref(p, "型注釈には型名を書きます（例: x: int = 0）");
 
     // 初期化式は必須（言語仕様 5.1：未初期化変数を作らせない）
     if (!tok_is(peek(p), "=")) {
@@ -475,7 +542,7 @@ static Node *var_decl(Parser *p) {
 
     Node *n = new_node(ND_VARDECL, name_tok);
     n->name = name_tok->text;
-    n->type_name = ty_tok->text;
+    n->type_ref = tr;
     n->rhs = expr(p);
     return n;
 }
@@ -528,7 +595,7 @@ static Node *simple_stmt(Parser *p) {
         //
         // ★ 第7章までは「プログラムの値＝最後の式」だったので、裸の式を
         //   文として書けました。第8章で足場を外したので本来の厳しさに戻します。
-        if (lhs->kind != ND_CALL) {
+        if (lhs->kind != ND_CALL && lhs->kind != ND_METHOD) {
             Diag d = {0};
             d.message = "この式は文として書けません";
             d.primary.tok = lhs->tok;
@@ -540,12 +607,13 @@ static Node *simple_stmt(Parser *p) {
     }
 
     // ここから代入。左辺が代入先になれるか確認する。
-    if (lhs->kind != ND_VAR) {
+    // ★ 第5章の設計どおり、条件を 1 つ足すだけで xs[0] = v に対応できました。
+    if (lhs->kind != ND_VAR && lhs->kind != ND_INDEX) {
         Diag d = {0};
         d.message = "この式には代入できません";
         d.primary.tok = lhs->tok;
-        d.primary.label = "代入先にできるのは変数だけです";
-        d.hint = "添字 xs[0] やフィールド p.f への代入は第10章・第12章で対応します";
+        d.primary.label = "代入先にできるのは変数と添字 xs[i] だけです";
+        d.hint = "フィールド p.f への代入は第12章で対応します";
         diag_fail(&d);
     }
     advance(p);  // "=" または複合代入記号
@@ -688,6 +756,24 @@ static Token *type_name_token(Parser *p, const char *what) {
     error_at_hint(t, what, "型名が必要です");
 }
 
+// type_ref ::= IDENT [ "[" type_ref "]" ]
+//
+// ★ 第10章：型注釈が木になりました。list[list[int]] のように入れ子になるので、
+//   文字列 1 個では表せません。再帰下降なら再帰 1 行で読めます。
+static Node *type_ref(Parser *p, const char *what) {
+    Token *t = type_name_token(p, what);
+
+    Node *n = new_node(ND_TYPEREF, t);
+    n->name = t->text;
+
+    Token *open = peek(p);
+    if (consume(p, "[")) {
+        n->lhs = type_ref(p, "要素型を書いてください（例: list[int]）");
+        expect_close(p, "]", open);
+    }
+    return n;
+}
+
 // param ::= IDENT ":" type
 static Node *param(Parser *p) {
     Token *name_tok = peek(p);
@@ -700,11 +786,11 @@ static Node *param(Parser *p) {
         error_at_hint(peek(p), "引数には型注釈が必須です（例: n: int）",
                       "引数名の後に ':' が必要です");
 
-    Token *ty_tok = type_name_token(p, "引数には型注釈が必須です（例: n: int）");
+    Node *tr = type_ref(p, "引数には型注釈が必須です（例: n: int）");
 
     Node *n = new_node(ND_PARAM, name_tok);
     n->name = name_tok->text;
-    n->type_name = ty_tok->text;
+    n->type_ref = tr;
     return n;
 }
 
@@ -746,8 +832,7 @@ static Node *func_def(Parser *p) {
                       "戻り型は省略できません。値を返さないなら -> None と書きます",
                       "'->' と戻り型が必要です");
 
-    Token *ret_tok = type_name_token(p, "戻り型には型名を書きます（例: -> int / -> None）");
-    n->type_name = ret_tok->text;
+    n->type_ref = type_ref(p, "戻り型には型名を書きます（例: -> int / -> None）");
 
     expect_colon(p, "def の宣言");
     n->body = block(p);

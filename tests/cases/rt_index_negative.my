@@ -1,0 +1,6 @@
+# EXIT: 1
+# ⚠️ Python の xs[-1]（末尾）は採用しない。負の添字は範囲外
+def main() -> int:
+    xs: list[int] = [1, 2]
+    n: int = 0 - 1
+    return xs[n]

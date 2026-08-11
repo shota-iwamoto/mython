@@ -412,13 +412,17 @@ static const char *PUNCTS[] = {
     "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")", ":", "=",
     "<", ">",
     ",",  // 第8章：引数の区切り
+    "[", "]", ".",  // 第10章：リスト・添字・メソッド
     NULL,
 };
 
 // 開き括弧・閉じ括弧の対応表。
 // 第10章で "[" "]"、第12章で "{" "}" を足すときはここに 1 文字ずつ加えるだけです。
-static const char *OPEN_BRACKETS = "(";
-static const char *CLOSE_BRACKETS = ")";
+// 括弧の中では改行を無視する（論理行が続く）。第4章で ( ) だけだったが、
+// 第10章で [ ] が加わった。
+// ⚠️ ここを更新し忘れると、複数行のリストリテラルが書けなくなります。
+static const char *OPEN_BRACKETS = "([";
+static const char *CLOSE_BRACKETS = ")]";
 
 // 記号を 1 つ読む。読めたら 1、読めなければ 0 を返す。
 static int read_punct(Lexer *lx) {
