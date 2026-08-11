@@ -9,6 +9,7 @@
 typedef struct {
     TokenVec toks;
     int pos;
+    int hidden;  // 脱糖で作る隠し変数の連番（第11章）
 } Parser;
 
 // ── トークン操作の基本部品 ──────────────────────────────────
@@ -706,6 +707,171 @@ static Node *if_stmt(Parser *p) {
     return n;
 }
 
+// 脱糖で作る隠し変数の名前。
+//
+// ⚠️ '.' を含むので、利用者が書ける識別子とは絶対に衝突しません。
+//    ネストしても衝突しないよう連番を振ります（シャドーイング禁止のため、
+//    同名だと内側の for が「外側を隠しています」というエラーになる）。
+static char *hidden_name(Parser *p, const char *tag) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "for.%s.%d", tag, p->hidden++);
+    return sb_str(&sb);
+}
+
+// 隠し変数の宣言（型注釈なし = 初期化式の型を使う。第11章）
+static Node *hidden_decl(Token *tok, char *name, Node *init) {
+    Node *n = new_node(ND_VARDECL, tok);
+    n->name = name;
+    n->rhs = init;
+    return n;  // type_ref は NULL のまま
+}
+
+// for_stmt ::= "for" IDENT "in" expr ":" block
+//
+// ★ この章の主題：for は新しい機能ではなく while の書き換えです。
+//   構文解析器で書き換えてしまえば、sema も codegen も for を知らずに済みます。
+//   （第5章の複合代入、第7章の elif と同じ「脱糖」の手）
+//
+//     for x in xs:            for.it.0 = xs          ← 対象は 1 回だけ評価
+//         BODY          →     for.ix.0: int = 0
+//                             while for.ix.0 < len(for.it.0):
+//                                 x = for.it.0[for.ix.0]
+//                                 BODY
+//                               incr: for.ix.0 += 1  ← continue の飛び先
+//
+// ⚠️ 脱糖で作るノードにはソース上の位置がないので、
+//    for のトークンを流用します（全ノードが tok を持つ約束。第1章）。
+static Node *for_stmt(Parser *p) {
+    Token *t = advance(p);  // "for"
+
+    Token *var_tok = peek(p);
+    if (var_tok->kind != TK_IDENT)
+        error_at_hint(var_tok, "for のループ変数は名前で書きます（例: for x in xs:）",
+                      "ループ変数の名前が必要です");
+    advance(p);
+
+    if (!consume_kw(p, "in"))
+        error_at_hint(peek(p), "for は「for 変数 in 対象:」の形で書きます",
+                      "'in' が必要です");
+
+    // range(...) は特別扱い（言語仕様 5.5：イテレータプロトコルは作らない）
+    bool is_range = peek(p)->kind == TK_IDENT &&
+                    strcmp(peek(p)->text, "range") == 0 &&
+                    tok_is(peek_at(p, 1), "(");
+
+    Node *iter = NULL, *start = NULL, *stop = NULL;
+    long long step = 1;
+
+    if (is_range) {
+        advance(p);                 // "range"
+        Token *open = advance(p);   // "("
+
+        Node *a1 = expr(p);
+        Node *a2 = NULL, *a3 = NULL;
+        if (consume(p, ",")) a2 = expr(p);
+        if (consume(p, ",")) a3 = expr(p);
+        expect_close(p, ")", open);
+
+        if (!a2) {
+            start = new_int_node(t, 0);
+            stop = a1;
+        } else {
+            start = a1;
+            stop = a2;
+        }
+
+        if (a3) {
+            // ⚠️ 増分は整数リテラルだけ（v1 の制限）。
+            //    符号が実行時に決まると条件式が複雑になります
+            //    （(step>0 and i<end) or (step<0 and i>end) を組み立てることになる）。
+            //    符号がコンパイル時に分かれば '<' か '>' を選ぶだけで済みます。
+            long long sign = 1;
+            Node *lit = a3;
+            if (lit->kind == ND_UNARY && lit->op == OP_NEG) {
+                sign = -1;
+                lit = lit->lhs;
+            }
+            if (lit->kind != ND_INT)
+                error_at_hint(a3->tok,
+                              "増分は整数リテラルで書いてください（例: range(0, 10, 2)）。"
+                              "変数を使いたい場合は while で書けます",
+                              "range の増分が定数ではありません");
+            step = sign * lit->ival;
+            if (step == 0)
+                error_at_hint(a3->tok, "増分が 0 だと無限ループになります",
+                              "range の増分に 0 は使えません");
+        }
+    } else {
+        iter = expr(p);
+    }
+
+    expect_colon(p, "for の対象");
+    Node *body = block(p);
+
+    // ── ここから脱糖 ──
+    Node head = {0};
+    Node *cur = &head;
+
+    char *ix = hidden_name(p, "ix");
+    Node *cond = NULL;
+    Node *bind = NULL;
+
+    if (is_range) {
+        // for.ix.N: int = start
+        cur->next = hidden_decl(t, ix, start);
+        cur = cur->next;
+
+        // 増分の符号で条件の向きが変わる
+        cond = new_binop_node(t, step > 0 ? OP_LT : OP_GT, new_var_node(t, ix), stop);
+
+        // x = for.ix.N
+        bind = hidden_decl(t, var_tok->text, new_var_node(t, ix));
+    } else {
+        // for.it.N = <対象>（★ 1 回だけ評価する）
+        char *it = hidden_name(p, "it");
+        cur->next = hidden_decl(t, it, iter);
+        cur = cur->next;
+
+        // for.ix.N: int = 0
+        cur->next = hidden_decl(t, ix, new_int_node(t, 0));
+        cur = cur->next;
+
+        // for.ix.N < len(for.it.N)
+        Node *lencall = new_node(ND_CALL, t);
+        lencall->name = "len";
+        lencall->args = new_var_node(t, it);
+        cond = new_binop_node(t, OP_LT, new_var_node(t, ix), lencall);
+
+        // x = for.it.N[for.ix.N]
+        Node *idx = new_node(ND_INDEX, t);
+        idx->lhs = new_var_node(t, it);
+        idx->rhs = new_var_node(t, ix);
+        bind = hidden_decl(t, var_tok->text, idx);
+    }
+
+    // 本体の先頭にループ変数の束縛を差し込む
+    bind->next = body->body;
+    body->body = bind;
+
+    // for.ix.N += 1（または step）— ★ continue の飛び先になる
+    Node *inc = new_node(ND_ASSIGN, t);
+    inc->lhs = new_var_node(t, ix);
+    inc->rhs = new_binop_node(t, OP_ADD, new_var_node(t, ix), new_int_node(t, step));
+
+    Node *wh = new_node(ND_WHILE, t);
+    wh->lhs = cond;
+    wh->body = body;
+    wh->incr = inc;
+
+    cur->next = wh;
+
+    // 隠し変数を for 文のスコープに閉じ込めるため、ブロックで包む
+    Node *blk = new_node(ND_BLOCK, t);
+    blk->body = head.next;
+    return blk;
+}
+
 // while_stmt ::= "while" expr ":" block
 static Node *while_stmt(Parser *p) {
     Token *t = advance(p);  // "while"
@@ -725,6 +891,7 @@ static Node *stmt(Parser *p) {
 
     if (tok_is_kw(t, "if")) return if_stmt(p);
     if (tok_is_kw(t, "while")) return while_stmt(p);
+    if (tok_is_kw(t, "for")) return for_stmt(p);
 
     // 対応する if が無い elif / else。
     // 放っておいても primary() の「予約語は変数名として使えません」に
@@ -902,6 +1069,6 @@ static Node *program(Parser *p) {
 // ── 入口 ───────────────────────────────────────────────────
 
 Node *parse(TokenVec toks) {
-    Parser p = {.toks = toks, .pos = 0};
+    Parser p = {.toks = toks, .pos = 0, .hidden = 0};
     return program(&p);
 }

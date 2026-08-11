@@ -56,7 +56,7 @@
 | [第8章](chapters/ch08-functions.md) | 関数定義と呼び出し | ✅ 完成 |
 | [第9章](chapters/ch09-strings-and-runtime.md) | 文字列と C ランタイム連携 | ✅ 完成 |
 | [第10章](chapters/ch10-list.md) | list[T]（動的配列） | ✅ 完成 |
-| 第11章 | for 文と range | ⬜ 未着手 |
+| [第11章](chapters/ch11-for-and-range.md) | for 文と range | ✅ 完成 |
 | 第12章 | class（構造体とメソッド） | ⬜ 未着手 |
 | 第13章 | モジュールと import | ⬜ 未着手 |
 | 第14章 | 標準ライブラリ | ⬜ 未着手 |

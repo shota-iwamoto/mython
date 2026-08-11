@@ -636,12 +636,30 @@ static void gen_while(Emitter *e, Node *n) {
     char *cond = gen_expr(e, n->lhs);  // ★ 条件は反復のたびに評価される
     emit_cond_br(e, cond, body_l, end_l);
 
+    // ★ 第11章：増分があるなら continue の飛び先は「増分ブロック」。
+    //   無ければ従来どおり「条件ブロック」（第7章のまま）。
+    //
+    // ⚠️ ここを間違えると、for の中の continue が増分を飛ばして無限ループになります。
+    char incr_l[32];
+    const char *cont_l = cond_l;
+    if (n->incr) {
+        snprintf(incr_l, sizeof(incr_l), "for.incr.%d", id);
+        cont_l = incr_l;
+    }
+
     // break / continue の飛び先を積む
-    LoopCtx ctx = {.outer = e->loop, .break_label = end_l, .continue_label = cond_l};
+    LoopCtx ctx = {.outer = e->loop, .break_label = end_l, .continue_label = cont_l};
     e->loop = &ctx;
 
     emit_label(e, body_l);
     gen_stmt(e, n->body);
+
+    if (n->incr) {
+        // ★ emit_label が「終端していなければ br を補う」ので、
+        //   本体から増分ブロックへは自動的に繋がります（第6章の関数）。
+        emit_label(e, incr_l);
+        gen_stmt(e, n->incr);
+    }
     if (!e->terminated) emit_br(e, cond_l);  // ループバック
 
     e->loop = ctx.outer;  // ★ 対で戻す

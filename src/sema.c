@@ -374,10 +374,19 @@ static void check_stmt(Sema *s, Node *n);
 
 static void check_vardecl(Sema *s, Node *n) {
     // ① 型注釈を解決する（第10章で木になった）
-    Type *declared = resolve_type(n->type_ref);
-    if (declared->kind == TY_NONE)
-        error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
-                      "変数の型に None は使えません");
+    //
+    // ★ 第11章：type_ref が NULL なら「コンパイラが作った宣言」（for の脱糖）。
+    //   初期化式の型をそのまま使います。
+    // ⚠️ 利用者が書く宣言では parser が必ず type_ref を作るので、
+    //    「型注釈は必須」（言語仕様 3.3）は破られません。
+    //    言語仕様 5.5 も「ループ変数は型注釈不要（要素型から決まる）」としています。
+    Type *declared = NULL;
+    if (n->type_ref) {
+        declared = resolve_type(n->type_ref);
+        if (declared->kind == TY_NONE)
+            error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
+                          "変数の型に None は使えません");
+    }
 
     // ② 同じスコープでの再宣言を禁止（言語仕様 5.1）
     VarEntry *prev = lookup_local(s, n->name);
@@ -415,6 +424,15 @@ static void check_vardecl(Sema *s, Node *n) {
     s->expected = declared;
     Type *actual = check_expr(s, n->rhs);
     s->expected = NULL;
+
+    // 型注釈が無ければ、初期化式の型がそのまま変数の型になる（第11章）
+    if (!declared) {
+        if (actual->kind == TY_NONE)
+            error_at_hint(n->rhs->tok, "値を返さない式は変数に入れられません",
+                          "None 型の値は変数にできません");
+        declared = actual;
+    }
+
     if (!type_equal(actual, declared)) {
         Diag d = {0};
         d.message = "型が一致しません";
@@ -820,6 +838,7 @@ static void check_stmt(Sema *s, Node *n) {
             check_cond(s, "while の条件", n, n->lhs);
             s->loop_depth++;
             check_block(s, n->body);
+            if (n->incr) check_stmt(s, n->incr);  // for の増分（第11章）
             s->loop_depth--;
             break;
 

@@ -172,6 +172,11 @@ struct Node {
     Node *params;
     Node *args;
 
+    // ND_WHILE の増分処理（第11章）。for の脱糖でだけ使います。
+    // ★ C の for(init; cond; incr) の incr にあたるもの。
+    //   ここに置くと continue の飛び先を「増分」にできます。
+    Node *incr;
+
     // ND_IF の else 節（第7章）。
     // elif は「else の中の if」に脱糖するので、ND_BLOCK か ND_IF が入ります。
     Node *els;

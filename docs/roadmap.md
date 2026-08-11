@@ -127,9 +127,15 @@ note: 対応する '(' はここです
   再帰比較なしだとコンパイルが通って実行時に segfault することを実測で確認した
 - [→ 第10章](chapters/ch10-list.md)
 
-### ⬜ 第11章 for 文と range
+### ✅ 第11章 for 文と range
 - **達成目標**: `for i in range(10):` / `for x in xs:` が動く
 - 学ぶこと: 構文糖の脱糖（desugaring）— for を while に書き換える
+- 成果物: `for_stmt()` の脱糖、`ND_WHILE.incr`（continue の飛び先）、
+  隠し変数の命名、テスト 222 件
+- 注記: **新しいノード種別を 1 つも作らずに機能を増やす章**。
+  第7章の予告どおり「continue が増分を飛ばして無限ループ」の落とし穴を踏み、実測で確認した。
+  `str` を回せるのは `len()` と `[]` が str にも使えるおかげ（for 側は無変更）
+- [→ 第11章](chapters/ch11-for-and-range.md)
 
 ### ⬜ 第12章 class（構造体とメソッド）
 - **達成目標**: `class Token:` にフィールドとメソッドを定義して使える
