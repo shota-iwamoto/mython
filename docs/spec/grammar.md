@@ -348,11 +348,12 @@ Token | None         (* ch15 *)
 | ch6 | `or_expr` `and_expr` `not_expr` `comparison` |
 | ch7 | `if_stmt` `while_stmt` `break` `continue` `pass` |
 | ch8 | `func_def` `param_list` `return_stmt` `call_suffix` |
-| ch9 | `STRING` `FLOAT`、`extern_def`、`power`（`**` は負の指数を実行時エラーにするためランタイムが必要） |
+| ch9 | `STRING` `FLOAT`、`power`（`**` は負の指数を実行時エラーにするためランタイムが必要） |
 | ch10 | `list_display` `index_suffix`、`type` のジェネリック部分 |
 | ch11 | `for_stmt` |
 | ch12 | `class_def` `field_decl` `attr_suffix` |
 | ch13 | `import_stmt`、`type` のモジュール修飾 |
+| ch14 | `extern_def` |
 | ch15 | Nullable 型（`T \| None`。ch12 から移動） |
 
 **⚠️ 第1章の文法は仕様書の文法と一致しません。**

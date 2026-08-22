@@ -1232,6 +1232,60 @@ static Node *class_def(Parser *p) {
 //
 // ★ 第8章でトップレベルが「宣言だけ」になりました（言語仕様 6.3）。
 //   実行文は書けません。プログラムの入口は def main() -> int: です。
+// extern_def ::= "extern" "def" IDENT "(" [ param_list ] ")" "->" type NEWLINE
+//
+// ★ 新しいノード種別は作りません。ND_FUNC の body が NULL——
+//   「宣言はあるが定義がない」という意味そのものです（第14章）。
+static Node *extern_def(Parser *p) {
+    advance(p);  // "extern"
+
+    if (!tok_is_kw(peek(p), "def"))
+        error_at_hint(peek(p), "extern の後には def を書きます"
+                               "（例: extern def my_system(cmd: str) -> int）",
+                      "extern の後に def が必要です");
+    advance(p);  // "def"
+
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok, "extern def の後には C の関数名を書きます",
+                      "関数名が必要です");
+    advance(p);
+
+    Token *open = peek(p);
+    if (!consume(p, "("))
+        error_at_hint(peek(p), "引数リストを書いてください（例: (path: str)）",
+                      "'(' が必要です");
+
+    Node head = {0};
+    Node *cur = &head;
+    if (!tok_is(peek(p), ")")) {
+        for (;;) {
+            cur->next = param(p, false);
+            cur = cur->next;
+            if (!consume(p, ",")) break;
+        }
+    }
+    expect_close(p, ")", open);
+
+    if (!consume(p, "->"))
+        error_at_hint(peek(p), "戻り型を書いてください（例: -> int）",
+                      "'->' が必要です");
+
+    Node *n = new_node(ND_FUNC, name_tok);
+    n->name = name_tok->text;
+    n->params = head.next;
+    n->type_ref = type_ref(p, "戻り型を書いてください（例: -> int）");
+
+    // ⚠️ 本体は読みません。':' を書いていたらここで気づけるようにします。
+    if (tok_is(peek(p), ":"))
+        error_at_hint(peek(p), "extern 宣言は本体を持ちません（改行で終わります）",
+                      "extern def に ':' は書けません");
+    expect_newline(p);
+
+    n->body = NULL;  // ★ extern の印
+    return n;
+}
+
 // import_stmt ::= "import" IDENT NEWLINE
 //
 // ★ 新しいノード種別はこの 1 つだけです。
@@ -1274,7 +1328,7 @@ static Node *program(Parser *p) {
             d.message = "予期しないインデントです";
             d.primary.tok = t;
             d.primary.label = "この行が余分に字下げされています";
-            d.hint = "トップレベルに書けるのは def / class / import とグローバル変数だけです"
+            d.hint = "トップレベルに書けるのは def / class / import / extern とグローバル変数だけです"
                      "（言語仕様 6.3）";
             diag_fail(&d);
         }
@@ -1301,6 +1355,12 @@ static Node *program(Parser *p) {
             continue;
         }
 
+        if (tok_is_kw(t, "extern")) {  // 第14章
+            cur->next = extern_def(p);
+            cur = cur->next;
+            continue;
+        }
+
         // グローバル変数 ::= IDENT ":" type "=" expr NEWLINE
         if (t->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) {
             cur->next = var_decl(p);
@@ -1313,7 +1373,7 @@ static Node *program(Parser *p) {
         Diag d = {0};
         d.message = "トップレベルに実行文は書けません";
         d.primary.tok = t;
-        d.primary.label = "ここに書けるのは def / class / import とグローバル変数だけです";
+        d.primary.label = "ここに書けるのは def / class / import / extern とグローバル変数だけです";
         d.hint = "処理は main の中に書いてください:\n"
                  "             def main() -> int:\n"
                  "                 ...\n"

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 // ── エラー ─────────────────────────────────────────────────
 
@@ -146,6 +147,77 @@ long long my_ipow(long long base, long long exp) {
 
 _Noreturn void my_exit(long long code) { exit((int)code); }
 
+// ── ファイル入出力（第14章）────────────────────────────────
+//
+// ★ ここは「C でしか書けないもの」です。Mython で書けるものは lib/*.my に置きます
+//   （docs/chapters/ch14-stdlib.md 14.1 節）。
+//
+// ⚠️ 失敗したら panic で落とします。エラー値を返して利用者に検査させる形は
+//    `T | None` がまだ無いので書けません（第15章）。
+
+char *my_read_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "cannot open file: %s", path);
+        my_panic(buf);
+    }
+    fseek(fp, 0, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    char *buf = my_alloc((long long)size + 1);
+    size_t got = fread(buf, 1, (size_t)size, fp);
+    buf[got] = '\0';
+    fclose(fp);
+    return buf;
+}
+
+void my_write_file(const char *path, const char *text) {
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "cannot write file: %s", path);
+        my_panic(buf);
+    }
+    fputs(text, fp);
+    fclose(fp);
+}
+
+// ⚠️ bool ではなく int を返します。extern の境界を bool は越えられません
+//    （14.2 節。C の _Bool と i1 の ABI が環境依存のため）。
+long long my_file_exists(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    fclose(fp);
+    return 1;
+}
+
+// ── コマンドライン引数と外部コマンド（第14章）──────────────
+//
+// ★ この 2 つが無いと、Mython 製コンパイラは「コマンド」になれません
+//   （docs/design/self-hosting.md 3.4）。
+
+static long long g_argc;
+static char **g_argv;
+
+// 生成される C の main が、いちばん最初に呼びます。
+void my_set_args(long long argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
+}
+
+// ⚠️ system() が返すのは「終了コード」ではなく wait(2) の状態値です。
+//    そのまま返すと exit 3 が 768（3 << 8）に見えて驚くので、
+//    ここで終了コードに直します。境界の食い違いはランタイムで吸収します。
+long long my_system(const char *cmd) {
+    int st = system(cmd);
+    if (st == -1) return -1;
+    if (WIFEXITED(st)) return (long long)WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return (long long)(128 + WTERMSIG(st));
+    return (long long)st;
+}
+
 // ── list[T]（第10章）────────────────────────────────────────
 //
 // ★ 要素はすべて 8 バイトに統一します（int/bool は i64、str/list はポインタ）。
@@ -223,6 +295,16 @@ void my_list_set_i64(MyList *l, long long i, long long v) {
 void my_list_set_ptr(MyList *l, long long i, void *v) {
     my_list_check(l, i);
     ((void **)l->data)[i] = v;
+}
+
+// argv を list[str] にして返す（第14章）。
+//
+// ★ MyList を使うので、list の実装より後ろに置いています。
+//   argv の文字列はプロセスの寿命のあいだ有効なので、複製せずそのまま指します。
+MyList *my_argv(void) {
+    MyList *l = my_list_new();
+    for (long long i = 0; i < g_argc; i++) my_list_push_ptr(l, g_argv[i]);
+    return l;
 }
 
 // 文字列の添字：1 文字の str を返す（char 型は作らない。型システム 5.8）

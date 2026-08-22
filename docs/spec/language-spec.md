@@ -415,17 +415,24 @@ class Token:
 **⚠️ Python との差異**：コンストラクタ名は `__init__` ではなく `init`。
 ダンダー（`__x__`）記法を導入しないためです。
 
-### 5.11 extern 宣言 `[ch9]`
+### 5.11 extern 宣言 `[ch14]`
 
 C の関数を呼ぶための宣言です。
 
 ```python
-extern def malloc(size: int) -> str
-extern def strlen(s: str) -> int
+extern def my_read_file(path: str) -> str
+extern def my_system(cmd: str) -> int
 ```
 
-- 本体を持たない。リンク時に C 側の実体に解決される
-- 名前修飾（マングリング）を行わない
+- 本体を持たない（`:` もブロックも書かない。改行で終わる）
+- リンク時に C 側の実体に解決される
+- **名前修飾（マングリング）を行わない**（C 側で名前が決まっているため）
+- **`bool` は引数にも戻り値にも使えない**（`i1` と C の `_Bool` の ABI が
+  環境依存になるため。`int` で受けて `n == 1` と書く）
+- 使える型：`int` / `str` / `list[T]` / クラス / 戻り値の `None`
+
+**★ `extern` は標準ライブラリ（`lib/*.my`）の中に閉じ込めるのが作法です。**
+利用者は `io.read_file` を使い、C の関数名を知りません。
 
 ### 5.12 import `[ch13]`
 

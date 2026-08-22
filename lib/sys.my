@@ -1,0 +1,18 @@
+# sys.my — プロセス（第14章）
+#
+# ★ この 2 つが無いと、Mython 製コンパイラは「コマンド」になれません
+#   （docs/design/self-hosting.md 3.4）。
+
+extern def my_argv() -> list[str]
+extern def my_system(cmd: str) -> int
+
+# コマンドライン引数（argv[0] はプログラム名）
+def argv() -> list[str]:
+    return my_argv()
+
+def argc() -> int:
+    return len(my_argv())
+
+# 外部コマンドを実行して終了コードを返す
+def run(cmd: str) -> int:
+    return my_system(cmd)

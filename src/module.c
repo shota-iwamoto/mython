@@ -9,6 +9,12 @@
 #include "parser.h"
 #include "util.h"
 
+// ビルド時に Makefile が -DMYTHON_LIB_DIR=... で渡してきます（第14章）。
+// ⚠️ stage0 だけの割り切り（ビルドツリー内で完結すればよい）。第20章で見直します。
+#ifndef MYTHON_LIB_DIR
+#define MYTHON_LIB_DIR "lib"
+#endif
+
 // ── 読み込みの状態 ──────────────────────────────────────────
 typedef struct {
     char *dir;         // 入口ファイルのあるディレクトリ（探索場所。13.4 節）
@@ -68,14 +74,50 @@ static char *module_name_of(const char *path) {
     return name;
 }
 
-static char *path_for(Loader *ld, const char *name) {
+static bool file_exists(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    fclose(fp);
+    return true;
+}
+
+static char *join_path(const char *dir, const char *name) {
     StrBuf sb;
     sb_init(&sb);
     // ⚠️ 入口が "main.my" のときディレクトリは "." になります。
     //    "./lexer.my" と表示されると診断が読みにくいので、そこだけ省きます。
-    if (strcmp(ld->dir, ".") == 0) sb_printf(&sb, "%s.my", name);
-    else sb_printf(&sb, "%s/%s.my", ld->dir, name);
+    if (strcmp(dir, ".") == 0) sb_printf(&sb, "%s.my", name);
+    else sb_printf(&sb, "%s/%s.my", dir, name);
     return sb_str(&sb);
+}
+
+// モジュールを探す（第14章：探索場所が 2 つになった）。
+//
+//   ① 入口ファイルのあるディレクトリ
+//   ② lib/（標準ライブラリ。ビルド時に埋め込んだパス）
+//
+// ★ 優先順位は決めません。両方にあったらエラーにします。
+//   どちらを先にしても「黙って隠れる」ものが出るからです（14.4 節）。
+//   曖昧さは、解決規則を作るより起こせなくするほうが小さく済みます。
+static char *path_for(Loader *ld, const char *name, Token *from) {
+    char *user = join_path(ld->dir, name);
+    char *lib = join_path(MYTHON_LIB_DIR, name);
+
+    bool has_user = file_exists(user);
+    bool has_lib = file_exists(lib);
+
+    if (has_user && has_lib && strcmp(user, lib) != 0) {
+        Diag d = {0};
+        d.message = diag_fmt("モジュール '%s' が標準ライブラリと衝突しています", name);
+        d.primary.tok = from;
+        d.primary.label = "どちらを指しているか決められません";
+        d.hint = diag_fmt("見つかった場所:\n             %s\n             %s\n"
+                          "             どちらかの名前を変えてください",
+                          user, lib);
+        diag_fail(&d);
+    }
+    if (has_lib && !has_user) return lib;
+    return user;  // 見つからない場合も「利用者側のパス」を返す（診断に出すため）
 }
 
 static Module *find_module(Loader *ld, const char *name) {
@@ -121,13 +163,6 @@ bool module_file_exists(const char *dir, const char *name) {
     return true;
 }
 
-static bool file_exists(const char *path) {
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return false;
-    fclose(fp);
-    return true;
-}
-
 // ── 本体：深さ優先で import をたどる ────────────────────────
 //
 // ★ 再帰から戻るときに order へ積むと、それだけでトポロジカル順になります。
@@ -162,7 +197,7 @@ static Module *load(Loader *ld, const char *name, const char *path, Token *from)
     m->name = (char *)name;
     m->path = (char *)path;
     m->src = read_file(path);
-    m->dir = ld->dir;
+    m->dir = ld->dir;  // import を探す場所（入口ファイルのディレクトリ）
     m->state = 1;  // 訪問中
 
     // ★ 構文解析より前に表へ載せます。そうしないと循環を検出できません。
@@ -188,7 +223,7 @@ static Module *load(Loader *ld, const char *name, const char *path, Token *from)
             diag_fail(&e);
         }
 
-        Module *dep = load(ld, d->name, path_for(ld, d->name), d->tok);
+        Module *dep = load(ld, d->name, path_for(ld, d->name, d->tok), d->tok);
         add_dep(m, dep);
     }
     ld->depth--;

@@ -1,0 +1,5 @@
+# ERROR: extern の引数に bool は使えません
+extern def my_thing(flag: bool) -> int
+
+def main() -> int:
+    return 0

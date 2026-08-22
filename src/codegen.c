@@ -1155,9 +1155,18 @@ static void gen_global(Emitter *e, Node *n) {
 static void gen_c_main(Emitter *e, const char *main_ir_name) {
     e->tmp_counter = 0;
 
+    // ★ 第14章：argc / argv を受け取り、ランタイムに預けます。
+    //   sys.argv() はこれを list[str] にして返します。
+    //   ラッパ方式にしておいたので、利用者の main も AST も無変更です。
+    declare_rt(e, "void @my_set_args(i64, ptr)");
+
     sb_printf(&e->body, "\n");
-    sb_printf(&e->body, "define i32 @main() {\n");
+    sb_printf(&e->body, "define i32 @main(i32 %%argc, ptr %%argv) {\n");
     sb_printf(&e->body, "entry:\n");
+
+    char *a = new_tmp(e);
+    sb_printf(&e->body, "  %s = sext i32 %%argc to i64\n", a);
+    sb_printf(&e->body, "  call void @my_set_args(i64 %s, ptr %%argv)\n", a);
 
     char *t0 = new_tmp(e);
     sb_printf(&e->body, "  %s = call i64 @%s()\n", t0, main_ir_name);
@@ -1205,6 +1214,18 @@ char *codegen(Module *mod, const char *main_ir_name) {
         if (d->kind == ND_VARDECL) gen_global(&e, d);
     }
     for (Node *d = ast->body; d; d = d->next) {
+        // ★ 第14章：extern は宣言だけを出す（定義は C 側にある）
+        if (d->kind == ND_FUNC && !d->body) {
+            StrBuf types;
+            sb_init(&types);
+            bool first = true;
+            for (Node *pm = d->params; pm; pm = pm->next) {
+                sb_printf(&types, "%s%s", first ? "" : ", ", llvm_type(pm->type));
+                first = false;
+            }
+            declare_extern(&e, llvm_type(d->type), d->name, sb_str(&types));
+            continue;
+        }
         if (d->kind == ND_FUNC) gen_func(&e, d);
         // メソッドも、ふつうの関数とまったく同じ関数で出します。
         // 違うのは名前（@lexer.Token.show）と、第 1 引数が self であることだけ。

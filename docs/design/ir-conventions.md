@@ -676,13 +676,26 @@ Mython では引数に代入できる（`a = a + 1`）ので、ローカル変�
 Mython の `main` は `int` を返しますが（`i64`）、C の `main` は `i32` を返します。
 
 ```llvm
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
-  %t0 = call i64 @mython_main()
-  %t1 = trunc i64 %t0 to i32
-  ret i32 %t1
+  %t0 = sext i32 %argc to i64
+  call void @my_set_args(i64 %t0, ptr %argv)   ; ch14: sys.argv() のため
+  %t1 = call i64 @main.main()                  ; ch13: 入口モジュールの main
+  %t2 = trunc i64 %t1 to i32
+  ret i32 %t2
 }
 ```
+
+**⚠️ 呼ぶ相手の名前は章によって変わりました。**
+
+| 章 | ラッパが呼ぶ関数 | 備考 |
+|---|---|---|
+| ch8〜ch12 | `@mython_main` | C の `main` と衝突しないための名前 |
+| ch13〜 | `@<入口モジュール>.main` | モジュール修飾が衝突よけの役目を引き取った |
+
+**★ ch14 で `argc` / `argv` を受け取るようになりましたが、
+利用者の `main` も AST も 1 行も変わっていません。**
+ラッパ方式（下記の方式 A）の効果です。
 
 方式は 2 つあります。
 

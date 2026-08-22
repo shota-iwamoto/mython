@@ -44,6 +44,10 @@ RUNTIME_CFLAGS := -std=c11 -O2 -Wall -Wextra
 # ⚠️ stage0 だけの割り切り（ビルドツリー内で完結すればよい）。第20章で見直します。
 CFLAGS  += -DMYTHON_RUNTIME_O='"$(abspath $(RUNTIME_OBJ))"'
 
+# ── 標準ライブラリ（第14章）─────────────────────────────────
+# import が探す 2 つ目の場所。Mython で書かれた lib/*.my があります。
+CFLAGS  += -DMYTHON_LIB_DIR='"$(abspath lib)"'
+
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)

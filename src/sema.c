@@ -1579,6 +1579,20 @@ static void declare_class_members(Sema *s, Node *n) {
         if (m->kind == ND_FUNC) declare_method(s, c, m);
 }
 
+// extern の引数と戻り値に使える型か（第14章）。
+//
+// ⚠️ bool（i1）だけは通しません。C の _Bool との ABI が環境依存で、
+//    「たまたま動く」形になりやすいためです。境界は狭く保ちます。
+static void check_extern_type(Type *t, Token *tok, const char *what) {
+    if (t->kind != TY_BOOL) return;
+    Diag d = {0};
+    d.message = diag_fmt("extern の%sに bool は使えません", what);
+    d.primary.tok = tok;
+    d.primary.label = "この型は C との境界を越えられません";
+    d.hint = "int で受け取り、Mython 側で 'n == 1' と書いてください";
+    diag_fail(&d);
+}
+
 static void declare_func(Sema *s, Node *n) {
     reject_module_name(s, n->name, n->tok, "関数");
     if (lookup_class(s, n->name)) {
@@ -1632,7 +1646,17 @@ static void declare_func(Sema *s, Node *n) {
         pm->type = pt;
     }
 
-    f->ir_name = mod_mangle(s, n->name);  // ★ 第13章："lexer.make"
+    // ★ 第14章：extern は C 側で名前が決まっているので修飾しません
+    //   （言語仕様 5.11）。修飾の目的は「Mython 側の名前どうしの衝突を
+    //   避けること」なので、C のシンボルにはその目的が成立しません。
+    bool is_extern_decl = n->body == NULL;
+    if (is_extern_decl) {
+        check_extern_type(ret, n->tok, "戻り値");
+        for (Node *pm = n->params; pm; pm = pm->next)
+            check_extern_type(pm->type, pm->tok, "引数");
+    }
+
+    f->ir_name = is_extern_decl ? n->name : mod_mangle(s, n->name);
     f->owner = s->cur;
     f->next = s->funcs;
     s->funcs = f;
@@ -1780,7 +1804,8 @@ static void declare_module(Sema *s, Node *ast) {
 // モジュール 1 つぶんの本体を検査する（パス 2）
 static void check_module(Sema *s, Node *ast) {
     for (Node *d = ast->body; d; d = d->next) {
-        if (d->kind == ND_FUNC) check_func(s, d);
+        // ⚠️ extern は本体を持たないので検査するものがありません（第14章）
+        if (d->kind == ND_FUNC) { if (d->body) check_func(s, d); }
         // メソッドの本体も、ふつうの関数とまったく同じ手順で検査します。
         // self はもう「型が入った引数」なので、特別扱いは 1 つも要りません。
         else if (d->kind == ND_CLASS)

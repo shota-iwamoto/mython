@@ -1,0 +1,120 @@
+# strings.my — 文字列ヘルパ（第14章）
+#
+# ★ このファイルに C は 1 行もありません。
+#   第9章（str と +）・第10章（list[T]）・第11章（for / range）で入れた
+#   機能の組み合わせだけで書けています。
+#
+# ⚠️ 速度は考えていません。out = out + s[i] は毎回新しい文字列を確保するので
+#    substr は O(n^2) です。docs/chapters/ch14-stdlib.md 14.5 節のとおり、
+#    速度は第20章（ブートストラップ）の後に測ってから直します。
+
+# s の start から count 文字を取り出す（範囲外は切り詰める）
+def substr(s: str, start: int, count: int) -> str:
+    n: int = len(s)
+    i: int = start
+    if i < 0:
+        i = 0
+    stop: int = start + count
+    if stop > n:
+        stop = n
+    out: str = ""
+    while i < stop:
+        out = out + s[i]
+        i = i + 1
+    return out
+
+# 位置 at から sub が始まっているか
+def matches_at(s: str, sub: str, at: int) -> bool:
+    n: int = len(s)
+    m: int = len(sub)
+    if at + m > n:
+        return False
+    i: int = 0
+    while i < m:
+        if s[at + i] != sub[i]:
+            return False
+        i = i + 1
+    return True
+
+# sub が最初に現れる位置。無ければ -1
+#
+# ★ 「見つからない」を -1 で表すのは T | None が無いからです（第15章で直せる形）。
+def find(s: str, sub: str) -> int:
+    n: int = len(s)
+    m: int = len(sub)
+    if m == 0:
+        return 0
+    i: int = 0
+    while i + m <= n:
+        if matches_at(s, sub, i):
+            return i
+        i = i + 1
+    return -1
+
+def contains(s: str, sub: str) -> bool:
+    return find(s, sub) >= 0
+
+def startswith(s: str, prefix: str) -> bool:
+    return matches_at(s, prefix, 0)
+
+def endswith(s: str, suffix: str) -> bool:
+    return matches_at(s, suffix, len(s) - len(suffix))
+
+# sep で分割する。sep が空なら 1 文字ずつに分ける
+def split(s: str, sep: str) -> list[str]:
+    out: list[str] = []
+    n: int = len(s)
+    m: int = len(sep)
+
+    if m == 0:
+        for c in s:
+            out.append(c)
+        return out
+
+    start: int = 0
+    i: int = 0
+    while i + m <= n:
+        if matches_at(s, sep, i):
+            out.append(substr(s, start, i - start))
+            i = i + m
+            start = i
+        else:
+            i = i + 1
+    out.append(substr(s, start, n - start))
+    return out
+
+def join(xs: list[str], sep: str) -> str:
+    out: str = ""
+    i: int = 0
+    while i < len(xs):
+        if i > 0:
+            out = out + sep
+        out = out + xs[i]
+        i = i + 1
+    return out
+
+def is_space(c: str) -> bool:
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+
+# 前後の空白を落とす
+def strip(s: str) -> str:
+    n: int = len(s)
+    start: int = 0
+    while start < n and is_space(s[start]):
+        start = start + 1
+    stop: int = n
+    while stop > start and is_space(s[stop - 1]):
+        stop = stop - 1
+    return substr(s, start, stop - start)
+
+def repeat(s: str, times: int) -> str:
+    out: str = ""
+    for i in range(times):
+        out = out + s
+    return out
+
+# old をすべて new に置き換える
+def replace(s: str, old: str, new: str) -> str:
+    if len(old) == 0:
+        return s
+    return join(split(s, old), new)

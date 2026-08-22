@@ -1,0 +1,55 @@
+# dict.my — 文字列キーの表（第14章）
+#
+# ★ 値は int だけです。利用者定義のジェネリクスが無いためです
+#   （docs/design/self-hosting.md 3.7）。
+#   オブジェクトを入れたいときは list[T] に置いて、その添字を値にします:
+#
+#       table: list[Symbol] = []
+#       syms: dict.Dict = dict.Dict()
+#       table.append(sym)
+#       syms.set(sym.name, len(table) - 1)
+#
+# ⚠️ 探索は線形です。まず正しく動かし、速度は第20章の後に測ってから直します。
+
+class Dict:
+    keys_: list[str]
+    vals_: list[int]
+
+    def index_of(self, k: str) -> int:
+        i: int = 0
+        while i < len(self.keys_):
+            if self.keys_[i] == k:
+                return i
+            i = i + 1
+        return -1
+
+    def has(self, k: str) -> bool:
+        return self.index_of(k) >= 0
+
+    # 無ければ実行時エラー（T | None が無いので None を返せない）
+    def get(self, k: str) -> int:
+        i: int = self.index_of(k)
+        if i < 0:
+            panic("dict: key not found: " + k)
+        return self.vals_[i]
+
+    def get_or(self, k: str, default: int) -> int:
+        i: int = self.index_of(k)
+        if i < 0:
+            return default
+        return self.vals_[i]
+
+    # 既にあれば上書きする
+    def set(self, k: str, v: int) -> None:
+        i: int = self.index_of(k)
+        if i < 0:
+            self.keys_.append(k)
+            self.vals_.append(v)
+        else:
+            self.vals_[i] = v
+
+    def len(self) -> int:
+        return len(self.keys_)
+
+    def keys(self) -> list[str]:
+        return self.keys_
