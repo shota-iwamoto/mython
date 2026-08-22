@@ -4,10 +4,15 @@ class N:
     v: int
     next: N
 
+    def init(self, ok: bool) -> None:
+        self.v = 1
+        if ok:
+            self.next = self
+
     def show(self) -> None:
         print(self.v)
 
 def main() -> int:
-    a: N = N()
+    a: N = N(False)
     a.next.show()
     return 0

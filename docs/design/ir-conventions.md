@@ -731,17 +731,37 @@ entry:
 ```
 
 ```llvm
-; globals バッファに出力
+; ch9〜ch14
 @.str.0 = private unnamed_addr constant [6 x i8] c"hello\00"
+
+; ch15〜（★ 長さを前に置く）
+@.str.0 = private unnamed_addr constant { i64, [6 x i8] } { i64 5, [6 x i8] c"hello\00" }
 ```
 
-サイズは **文字数 + 1**（NUL 終端）。使うときはそのままポインタになります。
+**⚠️ 第15章で表現が変わりました。**
+
+```
+[ i64 長さ ][ バイト列 ... ][ '\0' ]
+             ^ str の「値」が指すのはここ
+```
+
+`len(s)` と `s[i]` が毎回 `strlen` していたため、1 文字ずつ回るコードが
+O(n²) になっていたからです（[ch15](../chapters/ch15-nullable.md) 15.7 節で実測）。
+長さを 8 バイト手前に置くと `my_str_len` が O(1) になります。
+
+**値が指すのはデータの先頭のまま**なので、C から見れば今までどおり
+NUL 終端の `char *` です（`extern` にそのまま渡せます）。
+
+使うときはデータ部を指す定数式を書きます。
 
 ```llvm
-%t0 = getelementptr [6 x i8], ptr @.str.0, i64 0, i64 0
-; ↑ 実は opaque pointer 時代は不要。@.str.0 をそのまま ptr として渡せる
-call void @my_print_str(ptr @.str.0)
+call void @my_print_str(
+    ptr getelementptr inbounds ({ i64, [6 x i8] }, ptr @.str.0, i32 0, i32 1))
 ```
+
+**⚠️ `extern` で C の関数が `str` を返す場合、その文字列も
+「長さ付き」でなければなりません**（`my_str_alloc` / `my_str_from_cstr` を使う）。
+`argv` のような素の C 文字列は、そのままでは Mython の `str` になりません。
 
 **⚠️ エスケープの書き方**：IR の文字列リテラルでは、印字不能文字を `\XX`（16進 2 桁）で書きます。
 

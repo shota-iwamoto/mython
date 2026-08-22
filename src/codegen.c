@@ -98,6 +98,8 @@ static const char *llvm_type(Type *t) {
         case TY_STR: return "ptr";    // 参照型（第9章）
         case TY_LIST: return "ptr";   // MyList へのポインタ（第10章）
         case TY_CLASS: return "ptr";  // インスタンスへのポインタ（第12章）
+        case TY_OPT: return "ptr";    // T | None（第15章）。None は null
+        case TY_NULL: return "ptr";   // None リテラル
         default: UNREACHABLE();
     }
 }
@@ -114,6 +116,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
         case TY_CLASS: return "ptr";  // 第12章
+        case TY_OPT: return "ptr";    // 第15章
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -266,19 +269,32 @@ static char *intern_str(Emitter *e, const char *bytes, int len) {
     sb_init(&lab);
     sb_printf(&lab, "@.str.%d", e->str_counter++);
 
-    // ⚠️ 長さは「バイト数 + 1」。NUL の分を忘れない。
+    // ★ 第15章：str は「長さ + バイト列」になりました（ランタイム参照）。
+    //   リテラルも同じ形で出し、値としてはデータ部を指すポインタを使います。
+    //
+    //     @.str.0 = private unnamed_addr constant { i64, [6 x i8] }
+    //                 { i64 5, [6 x i8] c"hello\00" }
+    //
+    // ⚠️ 配列の長さは「バイト数 + 1」。NUL の分を忘れない。
     StrBuf g;
     sb_init(&g);
-    sb_printf(&g, "%s = private unnamed_addr constant [%d x i8] c\"", sb_str(&lab),
-              len + 1);
+    sb_printf(&g, "%s = private unnamed_addr constant { i64, [%d x i8] } "
+                  "{ i64 %d, [%d x i8] c\"",
+              sb_str(&lab), len + 1, len, len + 1);
     for (int i = 0; i < len; i++) emit_ir_byte(&g, (unsigned char)bytes[i]);
-    sb_printf(&g, "\\00\"\n");
+    sb_printf(&g, "\\00\" }\n");
     sb_printf(&e->globals, "%s", sb_str(&g));
+
+    // 値として使うのはデータ部のアドレス（定数式でそのまま書ける）
+    StrBuf ref;
+    sb_init(&ref);
+    sb_printf(&ref, "getelementptr inbounds ({ i64, [%d x i8] }, ptr %s, i32 0, i32 1)",
+              len + 1, sb_str(&lab));
 
     StrLit *sl = xmalloc(sizeof(StrLit));
     sl->bytes = (char *)bytes;
     sl->len = len;
-    sl->label = sb_str(&lab);
+    sl->label = sb_str(&ref);
     sl->next = e->strs;
     e->strs = sl;
     return sl->label;
@@ -327,6 +343,15 @@ static char *gen_expr(Emitter *e, Node *n) {
         }
 
         case ND_BINOP: {
+            // ★ 第15章：is / is not は「null と比べる」だけ。1 命令で済みます。
+            if (n->op == OP_IS || n->op == OP_ISNOT) {
+                char *v = gen_expr(e, n->lhs);
+                char *t = new_tmp(e);
+                sb_printf(&e->fn, "  %s = icmp %s ptr %s, null\n", t,
+                          n->op == OP_IS ? "eq" : "ne", v);
+                return t;
+            }
+
             // ★ 左辺 → 右辺の順に生成する（仕様 4.5：評価順は左から右）
             char *l = gen_expr(e, n->lhs);
             char *r = gen_expr(e, n->rhs);
@@ -388,6 +413,10 @@ static char *gen_expr(Emitter *e, Node *n) {
             // True / False は i1 の即値。LLVM は "true" / "false" と書けます。
             return n->ival ? "true" : "false";
         }
+
+        case ND_NONE:
+            // ★ 第15章：None は「null というポインタ即値」。命令は出ません。
+            return "null";
 
         case ND_STR:
             // ★ リテラルは .rodata の定数。ラベルをそのまま ptr として使えます
@@ -500,8 +529,10 @@ static char *gen_logical(Emitter *e, Node *n) {
 static bool elem_is_ptr(Type *elem) {
     // ★ 第12章：クラスも参照（ポインタ）なので、ここに 1 語足すだけで
     //   list[Token] が動きます。第10章の設計がそのまま効いています。
+    // ★ 第15章：T | None もポインタ（None は null）。
     return elem->kind == TY_STR || elem->kind == TY_LIST ||
-           elem->kind == TY_CLASS;
+           elem->kind == TY_CLASS || elem->kind == TY_OPT ||
+           elem->kind == TY_NULL;
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）

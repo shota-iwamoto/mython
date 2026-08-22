@@ -145,9 +145,14 @@ C や Rust のように構造体をスタックに置けると高速ですが、
 // メモリ確保（失敗したら異常終了する）
 void *my_alloc(long long size);
 
-// 文字列
+// 文字列（★ ch15 から「長さ付き」。[i64 長さ][バイト列][NUL] で、
+//         値が指すのはバイト列の先頭。詳細は ir-conventions.md 8.1）
+char *my_str_alloc(long long len);                   // 長さ付きの器を確保する
+char *my_str_from_cstr(const char *s);               // C 文字列から作る
 char *my_str_concat(const char *a, const char *b);   // 新しい文字列を作る
-long long my_str_len(const char *s);
+long long my_str_len(const char *s);                 // ch15 から O(1)
+long long my_byte_at(const char *s, long long i);    // 確保しないバイトアクセス
+char *my_str_join(MyList *xs, const char *sep);      // O(n) の連結
 int  my_str_eq(const char *a, const char *b);
 char *my_str_from_int(long long n);
 char *my_str_sub(const char *s, long long start, long long len);

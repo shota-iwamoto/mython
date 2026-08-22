@@ -80,6 +80,8 @@ const char *op_symbol(OpKind op) {
         case OP_GE: return ">=";
         case OP_AND: return "and";
         case OP_OR: return "or";
+        case OP_IS: return "is";        // 第15章
+        case OP_ISNOT: return "is not";
         case OP_NEG: return "-";
         case OP_POS: return "+";
         case OP_BITNOT: return "~";
@@ -130,6 +132,10 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_NONE:  // 第15章
+            printf("None");
+            return;
+
         case ND_VAR:
             printf("(var %s)\n", n->name);
             break;

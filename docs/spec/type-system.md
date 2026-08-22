@@ -45,13 +45,26 @@ typedef enum {
 typedef struct Type Type;
 struct Type {
     TypeKind kind;
-    Type *elem;        // TY_LIST の要素型 / TY_DICT のキー型
-    Type *elem2;       // TY_DICT の値型
+    Type *elem;        // TY_LIST の要素型 / TY_OPT の中身の型
     char *name;        // TY_CLASS のクラス名
     struct ClassInfo *cls;  // TY_CLASS の定義情報（フィールド一覧など）
-    bool nullable;     // T | None なら true
+    Type *opt;         // この型の「T | None」版（1 個だけ作って覚えておく）
 };
 ```
+
+**⚠️ `bool nullable` をやめました（ch15）。**
+
+当初は `Type` に `nullable` フラグを持たせる設計でしたが、
+**`TY_OPT` という別の種類**にしました。理由は「書き忘れたときにどうなるか」です。
+
+```c
+if (t->kind == TY_CLASS) { ... t->cls ... }   // フラグ方式だと Token | None も通る
+```
+
+フラグだと、既存の判定を `Token | None` がすり抜けて**実行時に壊れます**。
+種類を分ければ、判定を書き忘れた場所は
+**「型 'Token | None' にフィールドはありません」で止まります**。
+（[ch15](../chapters/ch15-nullable.md) 15.2 節）
 
 ### プリミティブ型はシングルトンにする
 
@@ -76,9 +89,8 @@ Type *ty_none;
 ```
 type_equal(A, B) =
     A.kind == B.kind
-    かつ A.nullable == B.nullable
     かつ (A.kind == TY_LIST  なら  type_equal(A.elem, B.elem))
-    かつ (A.kind == TY_DICT  なら  type_equal(A.elem, B.elem) かつ type_equal(A.elem2, B.elem2))
+    かつ (A.kind == TY_OPT   なら  type_equal(A.elem, B.elem))
     かつ (A.kind == TY_CLASS なら  A.cls == B.cls)
 ```
 
@@ -93,10 +105,13 @@ type_equal(A, B) =
 
 ```
 assignable(S → T) =
-    type_equal(S, T)                                        (a) 完全一致
-    または (T.nullable == true かつ S は None 型)             (b) None を T|None に代入
-    または (T.nullable == true かつ S == T の non-null 版)    (c) T を T|None に代入
+    type_equal(S, T)                                     (a) 完全一致
+    または (T が TY_OPT かつ S が None リテラル)           (b) None を T|None に代入
+    または (T が TY_OPT かつ assignable(S → T.elem))      (c) T を T|None に代入
 ```
+
+**⚠️ nullable にできるのは参照型（`str` / `list[T]` / class）だけです** `[ch15]`。
+`None` はヌルポインタとして表すので、`int | None` は書けません。
 
 つまり **`T` → `T | None` は許すが、`T | None` → `T` は許さない**（一方向のみ）。
 
@@ -106,7 +121,7 @@ t2: Token | None = Token(0,"")  # (c) OK
 t3: Token = t                   # ✗ エラー: Token | None は Token に代入できません
 ```
 
-`T | None` から `T` を取り出すには、`None` チェックを経由します（第12章で narrowing を実装）。
+`T | None` から `T` を取り出すには、`None` チェックを経由します（第15章で narrowing を実装）。
 
 ```python
 if t is not None:
@@ -203,7 +218,8 @@ static Type *check_binop(Node *n) {
 ────────────────────────────────────────────────────────────────────────────────────
 Γ ⊢ a op b : bool
 
-Γ ⊢ a : T    Γ ⊢ b : T    T は class 型または nullable    op ∈ { == != is, is not }
+Γ ⊢ a : T    Γ ⊢ b : T    T は class 型    op ∈ { ==, != }
+Γ ⊢ a : T | None    op ∈ { is, is not }    右辺は None リテラルだけ
 ────────────────────────────────────────────────────────────────────────────────────
 Γ ⊢ a op b : bool
 ```
@@ -497,5 +513,6 @@ ch8:  関数シグネチャの 2 パス登録、呼び出しの検査、always_r
 ch9:  str / float の追加、組み込み関数のオーバーロード解決
 ch10: list[T]、双方向型検査（expected 引数）の導入
 ch11: for のループ変数の型決定
-ch12: class、フィールド・メソッド解決、nullable と narrowing
+ch12: class、フィールド・メソッド解決
+ch15: nullable と narrowing、代入互換性（assignable）
 ```

@@ -174,6 +174,14 @@ static Node *primary(Parser *p) {
         return new_str_node(t, t->text, t->slen);
     }
 
+    // None リテラル（第15章）。
+    // ★ 「値を返さない」を表す型の None（-> None）とは別物です。
+    //   ここで作るのは「ヌルポインタという値」で、型は TY_NULL になります。
+    if (tok_is_kw(t, "None")) {
+        advance(p);
+        return new_node(ND_NONE, t);
+    }
+
     // リストリテラル [1, 2, 3]（第10章）。
     //
     // ★ '[' の意味は位置で決まります：式の先頭ならリテラル、
@@ -449,6 +457,18 @@ static int compare_op(Token *t) {
 // ⚠️ 連鎖しません（言語仕様 4.1）。while ではなく if で書くのがポイントです。
 static Node *comparison(Parser *p) {
     Node *lhs = bitor_expr(p);
+
+    // ★ 第15章：is / is not。右辺は None だけを許します（sema が検査）。
+    //   一般の同一性比較にしないのは、クラスの == が既に参照比較だからです
+    //   （区別を説明できない記号は増やさない）。
+    Token *is_tok = peek(p);
+    if (tok_is_kw(is_tok, "is")) {
+        advance(p);
+        OpKind op = OP_IS;
+        if (consume_kw(p, "not")) op = OP_ISNOT;
+        Node *rhs = bitor_expr(p);
+        return new_binop_node(is_tok, op, lhs, rhs);
+    }
 
     Token *t = peek(p);
     int op = compare_op(t);
@@ -1032,6 +1052,22 @@ static Node *type_ref(Parser *p, const char *what) {
     if (consume(p, "[")) {
         n->lhs = type_ref(p, "要素型を書いてください（例: list[int]）");
         expect_close(p, "]", open);
+    }
+
+    // ★ 第15章：T | None。'|' の後ろは None だけです。
+    //   型の '|' と式の '|'（ビット OR）は同じ記号ですが、
+    //   型を読む関数と式を読む関数が別なので、ここでは迷いません
+    //   （docs/spec/grammar.md 6 節）。
+    if (tok_is(peek(p), "|")) {
+        Token *bar = advance(p);
+        if (!tok_is_kw(peek(p), "None"))
+            error_at_hint(peek(p),
+                          "型の '|' の後ろに書けるのは None だけです"
+                          "（共用体型はありません）",
+                          "'| None' の形で書いてください");
+        advance(p);
+        n->nullable = true;
+        n->tok = bar;
     }
     return n;
 }

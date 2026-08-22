@@ -56,13 +56,44 @@ void my_print_str(const char *s) { printf("%s\n", s); }
 void my_print_bool(long long v) { printf("%s\n", v ? "True" : "False"); }
 
 // ── 文字列 ─────────────────────────────────────────────────
+//
+// ★ 第15章：str の表現に「長さ」を持たせました。
+//
+//     [ i64 長さ ][ バイト列 ... ][ '\0' ]
+//                  ^ str の値が指すのはここ
+//
+//   ⚠️ なぜ変えたか（ch15 15.7 節）
+//     それまでの str は「ただの NUL 終端文字列」でした。すると
+//     len(s) も s[i] も毎回 strlen する＝ O(n) になり、
+//     字句解析器のように 1 文字ずつ回るコードが O(n^2) になります。
+//     4000 行のソースを読むだけで数秒かかる計算で、セルフホストできません。
+//
+//   ★ 値が指すのは「データの先頭」のままなので、C から見ると今までどおり
+//     NUL 終端の char * です（extern に渡してもそのまま使えます）。
+//     長さは p[-1] の位置（8 バイト手前）にあります。
 
-long long my_str_len(const char *s) { return (long long)strlen(s); }
+// 長さ len のバイト列を置ける str を確保する（NUL の分も含めて確保）。
+char *my_str_alloc(long long len) {
+    char *base = my_alloc(8 + len + 1);
+    *(long long *)base = len;
+    return base + 8;
+}
+
+// C 文字列から str を作る（argv など、ヘッダを持たない文字列から作るとき）
+char *my_str_from_cstr(const char *s) {
+    long long n = (long long)strlen(s);
+    char *p = my_str_alloc(n);
+    memcpy(p, s, (size_t)n + 1);
+    return p;
+}
+
+// ★ O(1) になりました（第15章）。
+long long my_str_len(const char *s) { return ((const long long *)s)[-1]; }
 
 char *my_str_concat(const char *a, const char *b) {
-    long long la = (long long)strlen(a);
-    long long lb = (long long)strlen(b);
-    char *p = my_alloc(la + lb + 1);
+    long long la = my_str_len(a);
+    long long lb = my_str_len(b);
+    char *p = my_str_alloc(la + lb);
     memcpy(p, a, (size_t)la);
     memcpy(p + la, b, (size_t)lb);
     p[la + lb] = '\0';
@@ -80,17 +111,13 @@ long long my_str_cmp(const char *a, const char *b) {
 char *my_str_from_int(long long v) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%lld", v);
-    char *p = my_alloc(n + 1);
+    char *p = my_str_alloc(n);
     memcpy(p, buf, (size_t)n + 1);
     return p;
 }
 
 char *my_str_from_bool(long long v) {
-    const char *s = v ? "True" : "False";
-    long long n = (long long)strlen(s);
-    char *p = my_alloc(n + 1);
-    memcpy(p, s, (size_t)n + 1);
-    return p;
+    return my_str_from_cstr(v ? "True" : "False");
 }
 
 // 文字列を整数にする。パースできなければ実行時エラー（言語仕様 7 節）。
@@ -108,7 +135,7 @@ long long my_ord(const char *s) {
 
 char *my_chr(long long v) {
     if (v < 0 || v > 255) my_panic("chr(): out of range");
-    char *p = my_alloc(2);
+    char *p = my_str_alloc(1);
     p[0] = (char)v;
     p[1] = '\0';
     return p;
@@ -166,9 +193,12 @@ char *my_read_file(const char *path) {
     long size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    char *buf = my_alloc((long long)size + 1);
+    char *buf = my_str_alloc((long long)size);
     size_t got = fread(buf, 1, (size_t)size, fp);
     buf[got] = '\0';
+    // ⚠️ テキストモードの差などで読めたバイト数が減ることがあるので、
+    //    実際に読めた長さで書き直します（長さは 8 バイト手前）。
+    ((long long *)buf)[-1] = (long long)got;
     fclose(fp);
     return buf;
 }
@@ -297,25 +327,74 @@ void my_list_set_ptr(MyList *l, long long i, void *v) {
     ((void **)l->data)[i] = v;
 }
 
+// list[str] を sep でつないだ str を作る（第15章）。
+//
+// ★ Mython 側で out = out + xs[i] と書くと O(n^2) になります
+//   （1 回ごとに全部コピーするため）。文字列を「組み立てる」のは
+//   セルフホストの IR 出力で毎回やることなので、ここだけは C で用意します。
+//   利用者は list[str] に溜めて最後に join する、という形で O(n) になります。
+char *my_str_join(MyList *xs, const char *sep) {
+    long long n = xs->len;
+    long long sep_len = my_str_len(sep);
+
+    long long total = n > 0 ? sep_len * (n - 1) : 0;
+    for (long long i = 0; i < n; i++)
+        total += my_str_len(((char **)xs->data)[i]);
+
+    char *p = my_str_alloc(total);
+    long long at = 0;
+    for (long long i = 0; i < n; i++) {
+        if (i > 0) {
+            memcpy(p + at, sep, (size_t)sep_len);
+            at += sep_len;
+        }
+        const char *e = ((char **)xs->data)[i];
+        long long el = my_str_len(e);
+        memcpy(p + at, e, (size_t)el);
+        at += el;
+    }
+    p[total] = '\0';
+    return p;
+}
+
 // argv を list[str] にして返す（第14章）。
 //
 // ★ MyList を使うので、list の実装より後ろに置いています。
 //   argv の文字列はプロセスの寿命のあいだ有効なので、複製せずそのまま指します。
 MyList *my_argv(void) {
     MyList *l = my_list_new();
-    for (long long i = 0; i < g_argc; i++) my_list_push_ptr(l, g_argv[i]);
+    // ⚠️ argv の文字列は C のものなので長さヘッダがありません。
+    //    Mython の str として渡すには作り直す必要があります（第15章）。
+    for (long long i = 0; i < g_argc; i++)
+        my_list_push_ptr(l, my_str_from_cstr(g_argv[i]));
     return l;
 }
 
-// 文字列の添字：1 文字の str を返す（char 型は作らない。型システム 5.8）
-char *my_str_index(const char *s, long long i) {
-    long long n = (long long)strlen(s);
+// 文字列の i 番目のバイトを int で返す（第15章）。
+//
+// ★ my_str_index と違い、確保しません。字句解析器のように 1 文字ずつ回る
+//   コードでは、1 文字ごとの 2 バイト確保が効いてきます（ch15 15.7 で実測）。
+// ⚠️ 言語には足していません。lib/strings.my から extern で呼ぶだけです
+//   （第14章で引いた境界線のとおり）。
+long long my_byte_at(const char *s, long long i) {
+    long long n = my_str_len(s);
     if (i < 0 || i >= n) {
         char buf[128];
         snprintf(buf, sizeof(buf), "index out of range: %lld (len=%lld)", i, n);
         my_panic(buf);
     }
-    char *p = my_alloc(2);
+    return (long long)(unsigned char)s[i];
+}
+
+// 文字列の添字：1 文字の str を返す（char 型は作らない。型システム 5.8）
+char *my_str_index(const char *s, long long i) {
+    long long n = my_str_len(s);
+    if (i < 0 || i >= n) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "index out of range: %lld (len=%lld)", i, n);
+        my_panic(buf);
+    }
+    char *p = my_str_alloc(1);
     p[0] = s[i];
     p[1] = '\0';
     return p;

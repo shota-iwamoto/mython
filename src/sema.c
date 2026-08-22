@@ -24,6 +24,11 @@ struct VarEntry {
                      //   ローカル : %x, %x.1
                      //   グローバル: @g.x（第8章）
     bool is_global;  // 第8章
+
+    // ★ 第15章：型が 2 つになりました。
+    //   declared … 宣言された型（Token | None）。代入できるかはこれで判定する
+    //   type     … 今の型。絞り込まれていれば Token になっている
+    Type *declared;
     Type *type;
     Token *decl_tok;  // 宣言された位置（再宣言エラーで「前の宣言はここ」を示す）
     VarEntry *next;
@@ -295,6 +300,7 @@ static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
     VarEntry *v = xmalloc(sizeof(VarEntry));
     v->name = name;
     v->ir_name = sb_str(&sb);
+    v->declared = type;
     v->type = type;
     v->decl_tok = tok;
     v->next = s->scope->vars;
@@ -320,7 +326,27 @@ static Type *check_field(Sema *s, Node *n);
 //
 // ★ 「名前から型への解決は sema の仕事」（第5章の判断 #47）が、
 //   複合型になっても同じ形で通用します。
+static Type *resolve_base_type(Sema *s, Node *tr);
+
+// ★ 第15章：T | None を包む層。
+//   nullable にできるのは参照型（str / list / class）だけです。
 static Type *resolve_type(Sema *s, Node *tr) {
+    Type *base = resolve_base_type(s, tr);
+    if (!tr->nullable) return base;
+
+    if (!type_can_be_opt(base)) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s | None' は書けません", type_name(base));
+        d.primary.tok = tr->tok;
+        d.primary.label = "この型は None になれません";
+        d.hint = "None はヌルポインタとして表すので、int や bool には付けられません"
+                 "（nullable にできるのは str / list[T] / class です）";
+        diag_fail(&d);
+    }
+    return type_opt(base);
+}
+
+static Type *resolve_base_type(Sema *s, Node *tr) {
     // ★ 第13章：lexer.Token のようにモジュール修飾された型注釈。
     //   引く表が「自分のモジュール」から「そのモジュール」に変わるだけです。
     if (tr->mod_name) {
@@ -397,6 +423,42 @@ static const char *no_implicit_hint(Type *got, Type *want) {
     return "Mython には暗黙の型変換がありません（言語仕様 3.5）";
 }
 
+// ── None リテラルと is / is not（第15章）──────────────────
+
+// x is None / x is not None の検査。
+//
+// ★ 右辺は None リテラルだけを許します。一般の同一性比較にしないのは、
+//   クラスの == が既に参照比較だからです（区別を説明できない記号は増やさない）。
+static Type *check_is(Sema *s, Node *n) {
+    Type *l = check_expr(s, n->lhs);
+
+    if (n->rhs->kind != ND_NONE) {
+        Type *r = check_expr(s, n->rhs);
+        Diag d = {0};
+        d.message = diag_fmt("%s は None との比較にだけ使えます", op_symbol(n->op));
+        d.primary.tok = n->rhs->tok;
+        d.primary.label = diag_fmt("ここには None を書いてください（型 '%s' の式です）",
+                                   type_name(r));
+        d.hint = "値が等しいかを調べるには == を使ってください";
+        diag_fail(&d);
+    }
+    n->rhs->type = ty_null;
+
+    if (l->kind != TY_OPT) {
+        Diag d = {0};
+        d.message = diag_fmt("型 '%s' の値が None になることはありません",
+                             type_name(l));
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = "この式は必ず値を持ちます";
+        d.hint = type_can_be_opt(l)
+                     ? diag_fmt("None を入れたいなら、型注釈を '%s | None' に"
+                                "してください", type_name(l))
+                     : "None になれるのは str / list[T] / class だけです";
+        diag_fail(&d);
+    }
+    return ty_bool;
+}
+
 // 二項演算子が、その型に適用できるか
 static bool op_supports(OpKind op, Type *t) {
     // ★ 第12章：クラスと list は「参照」なので、比べられるのは
@@ -404,6 +466,10 @@ static bool op_supports(OpKind op, Type *t) {
     //   （言語仕様 4.3 / docs/spec/type-system.md 5.6）。
     if (t->kind == TY_CLASS || t->kind == TY_LIST)
         return op == OP_EQ || op == OP_NE;
+
+    // ★ 第15章：T | None には何も適用できません。
+    //   == で比べたいなら、先に絞り込んでもらいます（None かどうかは is で調べる）。
+    if (t->kind == TY_OPT || t->kind == TY_NULL) return false;
 
     // 比較は int どうし・bool どうしのどちらでも使える。
     // （両辺の型が等しいことは呼び出し側で検査済み）
@@ -441,6 +507,9 @@ static Type *bool_required(const char *message, const char *where_label,
 }
 
 static Type *check_binop(Sema *s, Node *n) {
+    // ★ 第15章：is / is not は型の合わせ方がまったく違うので、先に分岐します
+    if (n->op == OP_IS || n->op == OP_ISNOT) return check_is(s, n);
+
     Type *l = check_expr(s, n->lhs);
     Type *r = check_expr(s, n->rhs);
 
@@ -567,6 +636,7 @@ static Type *check_expr(Sema *s, Node *n) {
         case ND_INT: t = ty_int; break;
         case ND_BOOL: t = ty_bool; break;
         case ND_STR: t = ty_str; break;
+        case ND_NONE: t = ty_null; break;  // 第15章：ヌルポインタという「値」
         case ND_VAR: t = check_var(s, n); break;
         case ND_BINOP: t = check_binop(s, n); break;
         case ND_LOGICAL: t = check_logical(s, n); break;
@@ -647,7 +717,7 @@ static void check_vardecl(Sema *s, Node *n) {
         declared = actual;
     }
 
-    if (!type_equal(actual, declared)) {
+    if (!type_assignable(actual, declared)) {
         Diag d = {0};
         d.message = "型が一致しません";
         d.primary.tok = n->rhs->tok;
@@ -686,7 +756,7 @@ static void check_assign(Sema *s, Node *n) {
         Type *actual = check_expr(s, n->rhs);
         s->expected = NULL;
 
-        if (!type_equal(actual, et)) {
+        if (!type_assignable(actual, et)) {
             Diag d = {0};
             d.message = "型が一致しません";
             d.primary.tok = n->rhs->tok;
@@ -710,7 +780,7 @@ static void check_assign(Sema *s, Node *n) {
         Type *actual = check_expr(s, n->rhs);
         s->expected = NULL;
 
-        if (!type_equal(actual, ft)) {
+        if (!type_assignable(actual, ft)) {
             Diag d = {0};
             d.message = "型が一致しません";
             d.primary.tok = n->rhs->tok;
@@ -740,20 +810,30 @@ static void check_assign(Sema *s, Node *n) {
     target->type = v->type;
     target->ir_name = v->ir_name;
 
-    s->expected = v->type;  // ★ xs = [] のため（第10章）
+    // ★ 第15章：代入できるかは「宣言された型」で判定します。
+    //   絞り込みで一時的に狭くなっていても、代入できる範囲は変わりません。
+    s->expected = v->declared;  // ★ xs = [] のため（第10章）
     Type *actual = check_expr(s, n->rhs);
     s->expected = NULL;
-    if (!type_equal(actual, v->type)) {
+    if (!type_assignable(actual, v->declared)) {
         Diag d = {0};
         d.message = "型が一致しません";
         d.primary.tok = n->rhs->tok;
         d.primary.label = diag_fmt("型 '%s' の式", type_name(actual));
         d.related.tok = v->decl_tok;
         d.related.label = diag_fmt("変数 '%s' は '%s' 型として宣言されています",
-                                   v->name, type_name(v->type));
+                                   v->name, type_name(v->declared));
+        d.hint = no_implicit_hint(actual, v->declared);
         diag_fail(&d);
     }
-    n->type = v->type;
+
+    // ★ 代入したら絞り込みは解除する（15.5 節）。
+    //   cur = cur.next のあと、cur はまた None かもしれないからです。
+    //   本格的なフロー解析の代わりに「代入したら忘れる」という
+    //   保守的な近似で済ませています。
+    v->type = v->declared;
+    target->type = v->declared;
+    n->type = v->declared;
 }
 
 // 条件式は bool でなければならない（言語仕様 5.3 / 5.4）
@@ -766,9 +846,100 @@ static void check_cond(Sema *s, const char *where, Node *stmt_node, Node *cond) 
 
 // ブロックは新しいスコープを作る。
 // ★ 第5章で作った scope_push / scope_pop が、ここで初めて入れ子で対になります。
+// ── 絞り込み（narrowing。第15章）──────────────────────────
+//
+// ★ 第5章からの「変数の型は 1 つ」という前提を、ここだけ崩します。
+//
+//     t: Token | None = find()
+//     if t is not None:
+//         print(t.kind)     ← この中でだけ t は Token
+//
+// 実装は「入る前に変えて、抜けたら戻す」だけです。第7章のスコープと同じ形で、
+// C の呼び出しスタックがそのまま絞り込みのスタックになります。
+//
+// ⚠️ 絞れるのはローカル変数だけです（15.5 節）。
+//   ・グローバル変数 … 呼んだ関数の中で書き換えられるかもしれない
+//   ・フィールド     … node.next を絞ると「その間 node.next が変わらないこと」を
+//                      保証しなければならない。メソッド呼び出し 1 つで壊れる
+
+#define NARROW_MAX 16
+
+typedef struct {
+    VarEntry *vars[NARROW_MAX];
+    Type *saved[NARROW_MAX];
+    int n;
+} NarrowSet;
+
+static void narrow_one(Sema *s, Node *var_node, NarrowSet *ns) {
+    if (var_node->kind != ND_VAR) return;
+
+    VarEntry *v = lookup(s, var_node->name);
+    if (!v || v->is_global) return;   // グローバルは絞らない
+    if (v->type->kind != TY_OPT) return;
+    if (ns->n >= NARROW_MAX) return;  // 深すぎる条件は諦める（保守的でよい）
+
+    ns->vars[ns->n] = v;
+    ns->saved[ns->n] = v->type;
+    ns->n++;
+    v->type = v->type->elem;  // ★ ここだけ Token になる
+}
+
+// 条件式から「絞り込める変数」を集めて適用する。
+//   positive = true  … 条件が成り立つ側（then / while の本体）
+//   positive = false … 成り立たない側（else）
+static void narrow_apply(Sema *s, Node *cond, bool positive, NarrowSet *ns) {
+    if (!cond) return;
+
+    if (cond->kind == ND_BINOP && cond->op == OP_ISNOT && positive)
+        narrow_one(s, cond->lhs, ns);
+    else if (cond->kind == ND_BINOP && cond->op == OP_IS && !positive)
+        narrow_one(s, cond->lhs, ns);
+    else if (cond->kind == ND_LOGICAL && cond->op == OP_AND && positive) {
+        // a is not None and b is not None → 両方絞れる
+        // ⚠️ or は絞れません（どちらか一方しか保証されない）
+        narrow_apply(s, cond->lhs, true, ns);
+        narrow_apply(s, cond->rhs, true, ns);
+    }
+}
+
+static void narrow_restore(NarrowSet *ns) {
+    // ⚠️ 必ず戻します。戻し忘れると、if の外でも絞られたままになります。
+    for (int i = 0; i < ns->n; i++) ns->vars[i]->type = ns->saved[i];
+    ns->n = 0;
+}
+
+static bool always_returns(Node *n);
+
+// 文の並びを順に検査する（スコープは呼び出し側が用意する）。
+//
+// ★ 第15章：ガード節による絞り込みをここに入れます。
+//
+//     if b is None:
+//         return 0          ← ここで必ず抜ける
+//     return b.v            ← だから、この先の b は None ではない
+//
+// 「その if の中で必ず return するなら、その後ろでは条件の反対側が
+//   成り立っている」だけの判断です。到達可能性の検査（第8章の
+//   always_returns）を、そのまま絞り込みに再利用しています。
+//
+// ⚠️ 関数本体もブロックも同じ関数を通します。片方だけに入れると、
+//    「関数の直下では効くのに if の中では効かない」という説明できない差が出ます。
+static void check_stmt_list(Sema *s, Node *first) {
+    NarrowSet guard = {0};
+
+    for (Node *st = first; st; st = st->next) {
+        check_stmt(s, st);
+
+        if (st->kind == ND_IF && !st->els && always_returns(st->body))
+            narrow_apply(s, st->lhs, false, &guard);
+    }
+
+    narrow_restore(&guard);
+}
+
 static void check_block(Sema *s, Node *n) {
     scope_push(s);
-    for (Node *st = n->body; st; st = st->next) check_stmt(s, st);
+    check_stmt_list(s, n->body);
     scope_pop(s);
 }
 
@@ -872,15 +1043,23 @@ static Type *check_list_lit(Sema *s, Node *n) {
         return want;
     }
 
-    // 要素があるなら、最初の要素の型を要素型にする（推論はしない）
+    // 要素があるなら、最初の要素の型を要素型にする（推論はしない）。
+    //
+    // ★ 第15章：期待型があるなら、そちらを要素型に使います。
+    //   [Box(1), None] は最初の要素だけ見ると list[Box] になってしまい、
+    //   2 つ目の None が入りません。宣言に list[Box | None] と書いてあるなら
+    //   それに従うのが素直です（第10章の「空リストの期待型」の延長）。
     s->expected = want && want->kind == TY_LIST ? want->elem : NULL;
-    Type *et = check_expr(s, n->body);
+    Type *first = check_expr(s, n->body);
+    Type *et = first;
+    if (want && want->kind == TY_LIST && type_assignable(first, want->elem))
+        et = want->elem;
 
     int i = 2;
     for (Node *el = n->body->next; el; el = el->next, i++) {
         s->expected = et;
         Type *t = check_expr(s, el);
-        if (!type_equal(t, et)) {
+        if (!type_assignable(t, et)) {
             Diag d = {0};
             d.message = diag_fmt("リストの要素の型がそろっていません（第 %d 要素）", i);
             d.primary.tok = el->tok;
@@ -962,11 +1141,36 @@ static Type *check_module_global(Sema *s, Node *n, ModuleSyms *ms) {
     return v->type;
 }
 
+// ★ 第15章：T | None に '.' で触ろうとしたときの案内。
+//   ここが narrowing の入口になる、いちばんよく出るエラーです。
+static _Noreturn void reject_opt_access(Node *obj, Node *at, const char *what,
+                                        Type *ot) {
+    Diag d = {0};
+    d.message = diag_fmt("型 '%s' の値には%sがありません", type_name(ot), what);
+    d.primary.tok = at->tok;
+    d.primary.label = "None かもしれない値です";
+    d.related.tok = obj->tok;
+    d.related.label = diag_fmt("この式は '%s' 型です", type_name(ot));
+    if (obj->kind == ND_VAR)
+        d.hint = diag_fmt("先に None を除いてください:\n"
+                          "             if %s is not None:\n"
+                          "                 ...",
+                          obj->name);
+    else
+        d.hint = "一度ローカル変数に入れてから絞り込んでください:\n"
+                 "             x: T | None = ...\n"
+                 "             if x is not None:\n"
+                 "                 ...";
+    diag_fail(&d);
+}
+
 static Type *check_field(Sema *s, Node *n) {
     ModuleSyms *ms = dot_module(s, n);
     if (ms) return check_module_global(s, n, ms);
 
     Type *ot = check_expr(s, n->lhs);
+
+    if (ot->kind == TY_OPT) reject_opt_access(n->lhs, n, "フィールド", ot);
 
     if (ot->kind != TY_CLASS) {
         Diag d = {0};
@@ -1037,7 +1241,7 @@ static Type *check_class_method(Sema *s, Node *n, Class *c) {
         s->expected = f->params[i + 1];
         Type *at = check_expr(s, a);
         s->expected = NULL;
-        if (!type_equal(at, f->params[i + 1])) {
+        if (!type_assignable(at, f->params[i + 1])) {
             Diag d = {0};
             d.message = diag_fmt("メソッド '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
                                  mname, i + 1, type_name(at),
@@ -1099,6 +1303,8 @@ static Type *check_method(Sema *s, Node *n) {
 
     Type *ot = check_expr(s, n->lhs);
 
+    if (ot->kind == TY_OPT) reject_opt_access(n->lhs, n, "メソッド", ot);
+
     if (ot->kind == TY_CLASS) return check_class_method(s, n, ot->cls);
 
     if (ot->kind == TY_LIST && strcmp(n->name, "append") == 0) {
@@ -1118,9 +1324,9 @@ static Type *check_method(Sema *s, Node *n) {
         Type *at = check_expr(s, n->args);
         s->expected = NULL;
 
-        // ⚠️ ここでも type_equal()。list[list[int]] に list[str] を
+        // ⚠️ ここでも代入互換の検査。list[list[int]] に list[str] を
         //    append するのを弾くには、要素型の再帰比較が要ります。
-        if (!type_equal(at, ot->elem)) {
+        if (!type_assignable(at, ot->elem)) {
             Diag d = {0};
             d.message = diag_fmt("'%s' のリストに '%s' を追加できません",
                                  type_name(ot->elem), type_name(at));
@@ -1189,7 +1395,7 @@ static Type *check_new(Sema *s, Node *n, Class *c) {
         s->expected = f->params[i + 1];
         Type *at = check_expr(s, a);
         s->expected = NULL;
-        if (!type_equal(at, f->params[i + 1])) {
+        if (!type_assignable(at, f->params[i + 1])) {
             Diag d = {0};
             d.message = diag_fmt("'%s' の生成の第 %d 引数: 型 '%s' を '%s' に渡せません",
                                  c->name, i + 1, type_name(at),
@@ -1260,7 +1466,7 @@ static Type *check_call_sig(Sema *s, Node *n, FuncSig *f, const char *what) {
         // ⚠️ 引数には期待型を渡しません（第10章の判断のまま）。
         //    take([]) の [] は「型注釈を書いてください」というエラーになります。
         Type *at = check_expr(s, a);
-        if (!type_equal(at, f->params[i])) {
+        if (!type_assignable(at, f->params[i])) {
             Diag d = {0};
             d.message = diag_fmt("%s '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
                                  what, shown, i + 1, type_name(at),
@@ -1308,7 +1514,7 @@ static void check_return(Sema *s, Node *n) {
         d.related.label = "戻り型はここで宣言されています";
         diag_fail(&d);
     }
-    if (!type_equal(got, want)) {
+    if (!type_assignable(got, want)) {
         Diag d = {0};
         d.message = "return の型が戻り型と一致しません";
         d.primary.tok = n->lhs->tok;
@@ -1329,20 +1535,41 @@ static void check_stmt(Sema *s, Node *n) {
         case ND_RETURN: check_return(s, n); break;
         case ND_PASS: break;  // 何もしない
 
-        case ND_IF:
+        case ND_IF: {
             check_cond(s, "if の条件", n, n->lhs);
-            check_block(s, n->body);
-            // els は ND_BLOCK（else）か ND_IF（elif の脱糖結果）
-            if (n->els) check_stmt(s, n->els);
-            break;
 
-        case ND_WHILE:
+            // ★ 第15章：then 節では条件が成り立っている
+            NarrowSet ns = {0};
+            narrow_apply(s, n->lhs, true, &ns);
+            check_block(s, n->body);
+            narrow_restore(&ns);
+
+            // els は ND_BLOCK（else）か ND_IF（elif の脱糖結果）。
+            // else 節では条件が成り立っていない（if t is None: の反対側）。
+            if (n->els) {
+                NarrowSet es = {0};
+                narrow_apply(s, n->lhs, false, &es);
+                check_stmt(s, n->els);
+                narrow_restore(&es);
+            }
+            break;
+        }
+
+        case ND_WHILE: {
             check_cond(s, "while の条件", n, n->lhs);
             s->loop_depth++;
+
+            // ★ 本体に入れたということは条件が成り立っている。
+            //   while cur is not None: … 連結リストの走査に必須です。
+            NarrowSet ns = {0};
+            narrow_apply(s, n->lhs, true, &ns);
             check_block(s, n->body);
             if (n->incr) check_stmt(s, n->incr);  // for の増分（第11章）
+            narrow_restore(&ns);
+
             s->loop_depth--;
             break;
+        }
 
         case ND_BREAK:
         case ND_CONTINUE: {
@@ -1537,6 +1764,66 @@ static void declare_method(Sema *s, Class *c, Node *fn) {
 }
 
 // 1b：フィールドとメソッドを解決する。
+// ── 未初期化フィールドの検査（第15章。第12章からの宿題）────
+//
+// クラス型のフィールドは既定値を作れないので NULL から始まります（ch12 12.6）。
+// 第12章ではランタイムで検査していましたが、型の側から塞ぎます。
+//
+// ⚠️ この検査は「構文的」です。init のどこかに self.f = ... があるかを見るだけで、
+//    それが実行されるかまでは見ません（条件つきの代入はすり抜ける）。
+//    だから第12章のランタイム検査（my_check_not_none）は残します。
+//    静的検査で多くを早く捕まえ、残りを動的検査で安全に受け止めます。
+static bool assigns_field(Node *n, const char *fname) {
+    if (!n) return false;
+
+    if (n->kind == ND_ASSIGN && n->lhs->kind == ND_FIELD &&
+        n->lhs->lhs->kind == ND_VAR && strcmp(n->lhs->lhs->name, "self") == 0 &&
+        strcmp(n->lhs->name, fname) == 0)
+        return true;
+
+    if (assigns_field(n->lhs, fname)) return true;
+    if (assigns_field(n->rhs, fname)) return true;
+    if (assigns_field(n->els, fname)) return true;
+    if (assigns_field(n->incr, fname)) return true;
+    for (Node *st = n->body; st; st = st->next)
+        if (assigns_field(st, fname)) return true;
+    return false;
+}
+
+static Node *find_init(Class *c) {
+    for (Node *m = c->node->body; m; m = m->next)
+        if (m->kind == ND_FUNC && strcmp(m->name, "init") == 0) return m;
+    return NULL;
+}
+
+static void check_fields_initialized(Sema *s, Class *c) {
+    Node *init = find_init(c);
+
+    for (Field *f = c->fields; f; f = f->next) {
+        // ★ 既定値を作れる型は対象外です（int → 0 / str → "" / list → 空 /
+        //   T | None → None。どれも「有効な値」から始まります）。
+        if (f->type->kind != TY_CLASS) continue;
+        if (init && assigns_field(init->body, f->name)) continue;
+
+        Diag d = {0};
+        d.message = diag_fmt("フィールド '%s' は init で代入されていません", f->name);
+        d.primary.tok = f->tok;
+        d.primary.label = "このフィールドは None から始まってしまいます";
+        if (init) {
+            d.related.tok = init->tok;
+            d.related.label = "init はここです";
+        } else {
+            d.related.tok = c->tok;
+            d.related.label = "このクラスには init がありません";
+        }
+        d.hint = diag_fmt("次のどちらかにしてください:\n"
+                          "             ・型を '%s | None' にする\n"
+                          "             ・init の中で self.%s = ... と代入する",
+                          type_name(f->type), f->name);
+        diag_fail(&d);
+    }
+}
+
 static void declare_class_members(Sema *s, Node *n) {
     Class *c = n->cls;
 
@@ -1577,6 +1864,9 @@ static void declare_class_members(Sema *s, Node *n) {
     // ② メソッド
     for (Node *m = n->body; m; m = m->next)
         if (m->kind == ND_FUNC) declare_method(s, c, m);
+
+    // ③ 第15章：クラス型のフィールドが None から始まらないことを確かめる
+    check_fields_initialized(s, c);
 }
 
 // extern の引数と戻り値に使える型か（第14章）。
@@ -1696,7 +1986,7 @@ static void declare_global(Sema *s, Node *n) {
     }
 
     Type *actual = check_expr(s, n->rhs);
-    if (!type_equal(actual, declared)) {
+    if (!type_assignable(actual, declared)) {
         Diag d = {0};
         d.message = "型が一致しません";
         d.primary.tok = n->rhs->tok;
@@ -1718,6 +2008,7 @@ static void declare_global(Sema *s, Node *n) {
     v->name = n->name;
     v->ir_name = sb_str(&sb);
     v->is_global = true;
+    v->declared = declared;
     v->type = declared;
     v->decl_tok = n->tok;
     v->next = s->scope->vars;
@@ -1744,7 +2035,7 @@ static void check_func(Sema *s, Node *n) {
         pm->ir_name = v->ir_name;
     }
 
-    for (Node *st = n->body->body; st; st = st->next) check_stmt(s, st);
+    check_stmt_list(s, n->body->body);
     scope_pop(s);
 
     // 全経路で return するか（型システム 6.1）

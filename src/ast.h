@@ -58,6 +58,9 @@ typedef enum {
     // ── 第13章：モジュール ──
     ND_IMPORT,  // import lexer → name（モジュール名）, mod（解決したモジュール）
 
+    // ── 第15章：nullable ──
+    ND_NONE,  // None リテラル（ヌルポインタという「値」）
+
     // ── 第14章以降で追加していく ──
 } NodeKind;
 
@@ -91,6 +94,10 @@ typedef enum {
     // 論理（ND_LOGICAL。短絡評価する）
     OP_AND,  // and
     OP_OR,   // or
+
+    // 第15章：None との同一性比較（右辺は必ず None リテラル）
+    OP_IS,      // is
+    OP_ISNOT,   // is not
 
     // 単項
     OP_NEG,     // -x
@@ -198,6 +205,9 @@ struct Node {
     // 型注釈の木（ND_VARDECL / ND_PARAM / ND_FUNC）。第10章。
     // ★ list[list[int]] のように入れ子になるので、文字列 1 個では表せません。
     Node *type_ref;
+
+    // 型注釈が T | None か（ND_TYPEREF。第15章）
+    bool nullable;
 
     // 型注釈に書かれた名前（ND_TYPEREF）。
     // 「int」のような文字列で、sema が Type * に解決します。

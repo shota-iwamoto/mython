@@ -8,6 +8,18 @@
 #    substr は O(n^2) です。docs/chapters/ch14-stdlib.md 14.5 節のとおり、
 #    速度は第20章（ブートストラップ）の後に測ってから直します。
 
+# i 番目のバイトを int で返す（確保しない。第15章 15.7 節）
+#
+# ★ 言語には足していません。第14章で作った extern でランタイムを呼ぶだけです。
+#   s[i] は 1 文字の str を「毎回ヒープに確保して」返すので、
+#   字句解析器のように 1 文字ずつ回るコードではこちらを使います。
+extern def my_byte_at(s: str, i: int) -> int
+extern def my_str_join(xs: list[str], sep: str) -> str
+
+def byte_at(s: str, i: int) -> int:
+    return my_byte_at(s, i)
+
+
 # s の start から count 文字を取り出す（範囲外は切り詰める）
 def substr(s: str, start: int, count: int) -> str:
     n: int = len(s)
@@ -24,14 +36,17 @@ def substr(s: str, start: int, count: int) -> str:
     return out
 
 # 位置 at から sub が始まっているか
+#
+# ★ 第15章：比較は byte_at（int）で行います。s[i] は 1 文字の str を
+#   毎回ヒープに確保するので、内側のループで使うと効いてきます（15.7 節）。
 def matches_at(s: str, sub: str, at: int) -> bool:
     n: int = len(s)
     m: int = len(sub)
-    if at + m > n:
+    if at < 0 or at + m > n:
         return False
     i: int = 0
     while i < m:
-        if s[at + i] != sub[i]:
+        if byte_at(s, at + i) != byte_at(sub, i):
             return False
         i = i + 1
     return True
@@ -83,27 +98,27 @@ def split(s: str, sep: str) -> list[str]:
     out.append(substr(s, start, n - start))
     return out
 
+# ★ 第15章：ランタイムに任せます。
+#   out = out + xs[i] を繰り返すと O(n^2) になり、セルフホストの
+#   IR 出力（何万行も組み立てる）で効いてきます。
+#   「list[str] に溜めて最後に join する」が Mython での文字列組み立ての形です。
 def join(xs: list[str], sep: str) -> str:
-    out: str = ""
-    i: int = 0
-    while i < len(xs):
-        if i > 0:
-            out = out + sep
-        out = out + xs[i]
-        i = i + 1
-    return out
+    return my_str_join(xs, sep)
 
 def is_space(c: str) -> bool:
     return c == " " or c == "\t" or c == "\n" or c == "\r"
+
+def is_space_byte(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13
 
 # 前後の空白を落とす
 def strip(s: str) -> str:
     n: int = len(s)
     start: int = 0
-    while start < n and is_space(s[start]):
+    while start < n and is_space_byte(byte_at(s, start)):
         start = start + 1
     stop: int = n
-    while stop > start and is_space(s[stop - 1]):
+    while stop > start and is_space_byte(byte_at(s, stop - 1)):
         stop = stop - 1
     return substr(s, start, stop - start)
 

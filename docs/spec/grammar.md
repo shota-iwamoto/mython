@@ -354,7 +354,7 @@ Token | None         (* ch15 *)
 | ch12 | `class_def` `field_decl` `attr_suffix` |
 | ch13 | `import_stmt`、`type` のモジュール修飾 |
 | ch14 | `extern_def` |
-| ch15 | Nullable 型（`T \| None`。ch12 から移動） |
+| ch15 | Nullable 型（`T \| None`）、`None` リテラル、`is` / `is not` |
 
 **⚠️ 第1章の文法は仕様書の文法と一致しません。**
 これは意図的です。第1章では「パイプラインを通す」ことだけに集中するため、

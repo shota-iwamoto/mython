@@ -273,7 +273,24 @@ Mython は暗黙変換を持たないため、`//`（整数除算）か `float(a
 - `int`, `float`, `bool`: 値の比較
 - `str`: **内容**の比較（`==` は `strcmp(a,b)==0`）
 - `class` 型: **参照（アドレス）**の比較
-- `is` / `is not`: 常に参照の比較（`class` 型と `None` に対して使う）
+- `is` / `is not` `[ch15]`: **`None` との比較にだけ**使える（`x is None` / `x is not None`）
+  - 左辺は `T | None` 型でなければならない
+  - 一般の同一性比較には使わない（`class` の `==` が既に参照比較のため）
+
+### 4.3.1 nullable と絞り込み `[ch15]`
+
+```python
+t: Token | None = find()
+if t is not None:
+    print(t.kind)      # ★ この中でだけ t は Token
+```
+
+- `T | None` にできるのは**参照型**（`str` / `list[T]` / class）だけ
+- `T` → `T | None` は代入できる（広げる方向のみ）
+- `T | None` のまま `.` で触ることはできない（先に絞り込む）
+- 絞り込めるのは**ローカル変数**だけ（グローバル変数・フィールドは対象外）
+- 絞り込みは**代入で解除**される（`cur = cur.next` のあとは `T | None` に戻る）
+- `if x is None: return` のようなガード節の後ろでも絞り込まれる
 
 ### 4.4 論理演算 `[ch6]`
 

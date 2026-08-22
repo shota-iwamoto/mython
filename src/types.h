@@ -16,9 +16,19 @@ typedef enum {
     TY_STR,   // str  → ptr（参照型。第9章）
     TY_LIST,  // list[T] → ptr（複合型。第10章）
     TY_CLASS, // ユーザー定義クラス → ptr（参照型。第12章）
+
+    // ── 第15章：nullable ──
+    //
+    // ★ 当初は Type に bool nullable を足す設計でした（type-system.md 2 節）。
+    //   やめた理由は「書き忘れたときにどうなるか」です。フラグ方式だと
+    //   `if (t->kind == TY_CLASS)` という既存の判定を Token | None が
+    //   すり抜け、None のときに壊れます。種類を分ければ、判定を書き忘れた
+    //   場所は「型 'Token | None' にフィールドはありません」で止まります。
+    TY_OPT,   // T | None → ptr（elem が中身の型）
+    TY_NULL,  // None リテラルの型。変数の型にはならない（代入互換だけで使う）
+
     // ── 以降の章で追加していく ──
     // TY_FLOAT,  // float
-    // nullable（T | None）は Type にフラグを足す形で第15章
 } TypeKind;
 
 // クラス定義の実体は ast.h にあります（フィールドの並びとメソッドを持つため）。
@@ -36,6 +46,10 @@ struct Type {
     // ── class 用（第12章）──
     char *name;         // クラス名（エラーメッセージ用）
     struct Class *cls;  // 定義への参照。★ 型の同一性はこのポインタで判定する
+
+    // ── 第15章 ──
+    // この型の「T | None」版（1 個だけ作ってここに覚えておく）
+    Type *opt;
 };
 
 // ★ プリミティブ型はシングルトン（起動時に 1 個だけ作る）。
@@ -50,6 +64,7 @@ extern Type *ty_int;
 extern Type *ty_bool;
 extern Type *ty_none;
 extern Type *ty_str;
+extern Type *ty_null;  // None リテラルの型（第15章）
 
 // プリミティブ型のシングルトンを作る。main の最初に 1 回だけ呼ぶ。
 void types_init(void);
@@ -72,6 +87,22 @@ Type *type_from_kind(int kind);
 // ⚠️ シングルトンではありません。書かれた場所ごとに新しく作られるので、
 //    型の比較は必ず type_equal() を通すこと。
 Type *type_list(Type *elem);
+
+// T | None を作る（第15章）。
+// ★ 同じ T に対しては 1 個だけ作ります（elem 側にキャッシュする）。
+Type *type_opt(Type *elem);
+
+// nullable にできる型か（参照型だけ。int | None は書けない）
+bool type_can_be_opt(Type *t);
+
+// T | None なら中身の型、そうでなければ自分自身を返す
+Type *type_strip_opt(Type *t);
+
+// S の値を T の場所に置けるか（代入互換性。type-system.md 4 節）。
+//
+// ★ 第15章：ここが type_equal と分かれました。
+//   T → T | None は許し、T | None → T は許しません（一方向）。
+bool type_assignable(Type *from, Type *to);
 
 // クラスの型を作る（第12章）。
 // ★ list[T] と違い、クラス定義ごとに 1 個だけ作ります
