@@ -46,7 +46,14 @@ class Token:
     # ── 位置情報（エラー報告に使う。全トークンが必ず持つ）──
     file: str
     line: int
-    col: int
+    col: int    # 行頭からのバイト数（1 起算）。C 版の Token.col と同じ
+
+    # 表示用の桁（行頭からの文字数）。
+    #
+    # ⚠️ C 版は Token に持たせず、診断を描画するとき（src/diag.c）に
+    #   バイト数から文字数へ直しています。stage1 にはまだ diag が無いので、
+    #   字句解析器が計算して持ちます。**第18章で C 版と同じ形に直します。**
+    dcol: int
 
     # ── ソース上の実体 ──
     #
@@ -57,11 +64,12 @@ class Token:
     ival: int  # TK_INT の値
     slen: int  # text のバイト長
 
-    def init(self, kind: int, file: str, line: int, col: int) -> None:
+    def init(self, kind: int, file: str, line: int, col: int, dcol: int) -> None:
         self.kind = kind
         self.file = file
         self.line = line
         self.col = col
+        self.dcol = dcol
         self.raw = ""
         self.text = ""
         self.ival = 0

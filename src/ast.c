@@ -133,8 +133,8 @@ static void dump(Node *n, int depth) {
             printf(")\n");
             break;
         case ND_NONE:  // 第15章
-            printf("None");
-            return;
+            printf("(none)\n");
+            break;
 
         case ND_VAR:
             printf("(var %s)\n", n->name);
@@ -255,6 +255,10 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_IMPORT:  // 第13章
+            printf("(import %s)\n", n->name);
+            break;
+
         case ND_BLOCK:
             printf("(block\n");
             for (Node *s = n->body; s; s = s->next) dump(s, depth + 1);

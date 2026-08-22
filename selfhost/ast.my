@@ -1,0 +1,376 @@
+# ast.my — 抽象構文木（第17章）
+#
+# ★ src/ast.h / src/ast.c の移植です。**機械的に移しています。**
+#   種別の値と順序は C 版に揃えます（C 版を見ながら 1 つずつ確認するため）。
+#
+# 方針は C 版と同じ「全部入り構造体」（docs/design/architecture.md 3.2）。
+# ⚠️ 子ノードはほぼ全部 `Node | None` になります。C 版で NULL だったものを
+#    Mython で表す唯一の方法だからです（第15章）。
+import strings
+import token
+
+# ── ノードの種類（C 版 NodeKind と同じ順序・同じ値）──
+ND_INT: int = 0
+ND_BOOL: int = 1
+ND_STR: int = 2
+ND_BINOP: int = 3
+ND_LOGICAL: int = 4
+ND_UNARY: int = 5
+ND_VAR: int = 6
+ND_VARDECL: int = 7
+ND_ASSIGN: int = 8
+ND_BLOCK: int = 9
+ND_IF: int = 10
+ND_WHILE: int = 11
+ND_BREAK: int = 12
+ND_CONTINUE: int = 13
+ND_PASS: int = 14
+ND_PRINT: int = 15
+ND_FUNC: int = 16
+ND_PARAM: int = 17
+ND_CALL: int = 18
+ND_RETURN: int = 19
+ND_TYPEREF: int = 20
+ND_LIST: int = 21
+ND_INDEX: int = 22
+ND_METHOD: int = 23
+ND_CLASS: int = 24
+ND_FIELDDECL: int = 25
+ND_FIELD: int = 26
+ND_IMPORT: int = 27
+ND_NONE: int = 28
+
+# ── 演算子の種類（C 版 OpKind と同じ順序・同じ値）──
+OP_ADD: int = 0
+OP_SUB: int = 1
+OP_MUL: int = 2
+OP_TRUEDIV: int = 3
+OP_FLOORDIV: int = 4
+OP_MOD: int = 5
+OP_BITAND: int = 6
+OP_BITOR: int = 7
+OP_BITXOR: int = 8
+OP_SHL: int = 9
+OP_SHR: int = 10
+OP_POW: int = 11
+OP_EQ: int = 12
+OP_NE: int = 13
+OP_LT: int = 14
+OP_LE: int = 15
+OP_GT: int = 16
+OP_GE: int = 17
+OP_AND: int = 18
+OP_OR: int = 19
+OP_IS: int = 20
+OP_ISNOT: int = 21
+OP_NEG: int = 22
+OP_POS: int = 23
+OP_BITNOT: int = 24
+OP_NOT: int = 25
+
+# 比較演算子か（C 版 is_compare。★ OP_EQ 〜 OP_GE が連続していることに依存）
+def is_compare(op: int) -> bool:
+    return op >= OP_EQ and op <= OP_GE
+
+# 演算子の記号（エラーメッセージと --dump-ast 用）
+def op_symbol(op: int) -> str:
+    if op == OP_ADD:
+        return "+"
+    if op == OP_SUB:
+        return "-"
+    if op == OP_MUL:
+        return "*"
+    if op == OP_TRUEDIV:
+        return "/"
+    if op == OP_FLOORDIV:
+        return "//"
+    if op == OP_MOD:
+        return "%"
+    if op == OP_BITAND:
+        return "&"
+    if op == OP_BITOR:
+        return "|"
+    if op == OP_BITXOR:
+        return "^"
+    if op == OP_SHL:
+        return "<<"
+    if op == OP_SHR:
+        return ">>"
+    if op == OP_POW:
+        return "**"
+    if op == OP_EQ:
+        return "=="
+    if op == OP_NE:
+        return "!="
+    if op == OP_LT:
+        return "<"
+    if op == OP_LE:
+        return "<="
+    if op == OP_GT:
+        return ">"
+    if op == OP_GE:
+        return ">="
+    if op == OP_AND:
+        return "and"
+    if op == OP_OR:
+        return "or"
+    if op == OP_IS:
+        return "is"
+    if op == OP_ISNOT:
+        return "is not"
+    if op == OP_NEG:
+        return "-"
+    if op == OP_POS:
+        return "+"
+    if op == OP_BITNOT:
+        return "~"
+    if op == OP_NOT:
+        return "not"
+    panic("ast.op_symbol: unknown op")
+    return ""
+
+
+# ── ノード ──────────────────────────────────────────────────
+#
+# ★ C 版と同じ「全部入り」方式。使わないフィールドは None のままです。
+class Node:
+    kind: int
+
+    # このノードの代表トークン（位置情報。全ノードが必ず持つ）
+    tok: token.Token | None
+
+    # ── 値 ──
+    ival: int    # ND_INT / ND_BOOL
+    sval: str    # ND_STR（エスケープ解決済み）
+    slen: int    # ND_STR のバイト長
+    op: int      # ND_BINOP / ND_LOGICAL / ND_UNARY
+    name: str    # 変数名・関数名・クラス名・モジュール名
+
+    # 型注釈が T | None か（ND_TYPEREF。第15章）
+    nullable: bool
+
+    # 型注釈のモジュール修飾（ND_TYPEREF。第13章）
+    mod_name: str
+
+    # ── 子ノード ──
+    lhs: Node | None
+    rhs: Node | None
+    body: Node | None       # ND_BLOCK の中身 / ND_IF の then / ND_CLASS のメンバ
+    els: Node | None        # ND_IF の else
+    incr: Node | None       # ND_WHILE の増分（for の脱糖。第11章）
+    params: Node | None     # ND_FUNC の仮引数
+    args: Node | None       # ND_CALL / ND_METHOD の実引数
+    type_ref: Node | None   # 型注釈の木
+
+    # 兄弟（文のリスト・引数リストは next で繋ぐ）
+    next: Node | None
+
+    def init(self, kind: int, tok: token.Token | None) -> None:
+        self.kind = kind
+        self.tok = tok
+        self.ival = 0
+        self.sval = ""
+        self.slen = 0
+        self.op = 0
+        self.name = ""
+        self.nullable = False
+        self.mod_name = ""
+
+
+# ── コンストラクタ（C 版の new_*_node と同じ形）──────────────
+
+def new_node(kind: int, tok: token.Token | None) -> Node:
+    return Node(kind, tok)
+
+def new_int_node(tok: token.Token | None, value: int) -> Node:
+    n: Node = Node(ND_INT, tok)
+    n.ival = value
+    return n
+
+def new_bool_node(tok: token.Token | None, value: bool) -> Node:
+    n: Node = Node(ND_BOOL, tok)
+    if value:
+        n.ival = 1
+    return n
+
+def new_str_node(tok: token.Token | None, bytes_: str, slen: int) -> Node:
+    n: Node = Node(ND_STR, tok)
+    n.sval = bytes_
+    n.slen = slen
+    return n
+
+def new_binop_node(tok: token.Token | None, op: int, lhs: Node, rhs: Node) -> Node:
+    n: Node = Node(ND_BINOP, tok)
+    n.op = op
+    n.lhs = lhs
+    n.rhs = rhs
+    return n
+
+def new_logical_node(tok: token.Token | None, op: int, lhs: Node, rhs: Node) -> Node:
+    n: Node = Node(ND_LOGICAL, tok)
+    n.op = op
+    n.lhs = lhs
+    n.rhs = rhs
+    return n
+
+def new_unary_node(tok: token.Token | None, op: int, operand: Node) -> Node:
+    n: Node = Node(ND_UNARY, tok)
+    n.op = op
+    n.lhs = operand
+    return n
+
+def new_var_node(tok: token.Token | None, name: str) -> Node:
+    n: Node = Node(ND_VAR, tok)
+    n.name = name
+    return n
+
+
+# ── S 式ダンプ（C 版 dump_ast と同じ出力）────────────────────
+#
+# ★ 木を歩く関数は最初から `Node | None` を受け取る形にします。
+#   そうすれば呼び出し側で絞り込む必要がなく、C 版と同じ書き方になります
+#   （ch17 17.3 節）。
+
+def indent_of(depth: int) -> str:
+    return strings.repeat("  ", depth)
+
+def dump(n: Node | None, depth: int) -> None:
+    pad: str = indent_of(depth)
+
+    if n is None:
+        print(pad + "(nil)")
+        return
+
+    # ★ ここから下では n は Node（絞り込み済み）
+
+    if n.kind == ND_INT:
+        print(pad + "(int " + str(n.ival) + ")")
+    elif n.kind == ND_BOOL:
+        if n.ival != 0:
+            print(pad + "(bool True)")
+        else:
+            print(pad + "(bool False)")
+    elif n.kind == ND_STR:
+        print(pad + "(str " + str(n.slen) + " bytes)")
+    elif n.kind == ND_LOGICAL:
+        print(pad + "(logical " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_BINOP:
+        print(pad + "(binop " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_UNARY:
+        print(pad + "(unary " + op_symbol(n.op))
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_NONE:
+        print(pad + "(none)")
+    elif n.kind == ND_VAR:
+        print(pad + "(var " + n.name + ")")
+    elif n.kind == ND_TYPEREF:
+        if n.lhs is None:
+            print(pad + "(type " + n.name + ")")
+        else:
+            print(pad + "(type " + n.name)
+            dump(n.lhs, depth + 1)
+            print(pad + ")")
+    elif n.kind == ND_LIST:
+        print(pad + "(list")
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_INDEX:
+        print(pad + "(index")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_METHOD:
+        print(pad + "(method " + n.name)
+        dump(n.lhs, depth + 1)
+        dump_siblings(n.args, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FIELD:
+        print(pad + "(field " + n.name)
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_CLASS:
+        print(pad + "(class " + n.name)
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FIELDDECL:
+        print(pad + "(fielddecl " + n.name)
+        dump(n.type_ref, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_VARDECL:
+        print(pad + "(vardecl " + n.name)
+        dump(n.type_ref, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_ASSIGN:
+        print(pad + "(assign")
+        dump(n.lhs, depth + 1)
+        dump(n.rhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_IF:
+        print(pad + "(if")
+        dump(n.lhs, depth + 1)
+        dump(n.body, depth + 1)
+        if n.els is not None:
+            dump(n.els, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_WHILE:
+        print(pad + "(while")
+        dump(n.lhs, depth + 1)
+        dump(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_BREAK:
+        print(pad + "(break)")
+    elif n.kind == ND_CONTINUE:
+        print(pad + "(continue)")
+    elif n.kind == ND_PASS:
+        print(pad + "(pass)")
+    elif n.kind == ND_PRINT:
+        print(pad + "(print")
+        dump(n.lhs, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_FUNC:
+        print(pad + "(func " + n.name)
+        dump(n.type_ref, depth + 1)
+        dump_siblings(n.params, depth + 1)
+        dump(n.body, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_PARAM:
+        print(pad + "(param " + n.name)
+        dump(n.type_ref, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_CALL:
+        print(pad + "(call " + n.name)
+        dump_siblings(n.args, depth + 1)
+        print(pad + ")")
+    elif n.kind == ND_RETURN:
+        if n.lhs is None:
+            print(pad + "(return)")
+        else:
+            print(pad + "(return")
+            dump(n.lhs, depth + 1)
+            print(pad + ")")
+    elif n.kind == ND_IMPORT:
+        print(pad + "(import " + n.name + ")")
+    elif n.kind == ND_BLOCK:
+        print(pad + "(block")
+        dump_siblings(n.body, depth + 1)
+        print(pad + ")")
+    else:
+        panic("ast.dump: unknown node kind")
+
+# 兄弟をたどって全部出す（C 版の for (x = ...; x; x = x->next) と同じ）
+def dump_siblings(first: Node | None, depth: int) -> None:
+    cur: Node | None = first
+    while cur is not None:
+        dump(cur, depth)
+        cur = cur.next     # ★ 代入で絞り込みが解除される（第15章 15.5 節）
+
+def dump_ast(root: Node | None) -> None:
+    dump(root, 0)

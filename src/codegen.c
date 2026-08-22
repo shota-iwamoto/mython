@@ -79,9 +79,18 @@ struct LoopCtx {
 //    %0 のような数値名を自分で使うと、LLVM の暗黙採番と衝突して
 //    "instruction expected to be numbered '%N'" という分かりにくい
 //    エラーになります。
+// ⚠️ 第17章：名前に '.' を入れます。
+//    それまでは "%tN" でしたが、利用者が `t0` という変数を書くと
+//    IR 上で衝突しました（stage1 の移植中に踏んだ実際のバグ）。
+//
+//        %t0 = alloca ptr      ← 利用者の変数 t0
+//        %t0 = load ptr, ...   ← コンパイラの一時値
+//
+//    利用者の識別子に '.' は入れられないので、'.' を含む名前にすれば
+//    衝突は原理的に起きません（第11章の隠し変数 for.ix.0 と同じ手口）。
 static char *new_tmp(Emitter *e) {
     char *buf = xmalloc(24);
-    snprintf(buf, 24, "%%t%d", e->tmp_counter++);
+    snprintf(buf, 24, "%%t.%d", e->tmp_counter++);
     return buf;
 }
 

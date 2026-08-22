@@ -208,9 +208,16 @@ C 版（stage0）が正解を持っているので、常に出力を比較しな
   C 版の約 2 倍の速度で動く（1.66MB を 0.48 秒）
 - [→ 第16章](chapters/ch16-selfhost-lexer.md)
 
-### ⬜ 第17章 Mython で構文解析器を書く
-- 成果物: `selfhost/parser.my`
+### ✅ 第17章 Mython で構文解析器を書く
+- 成果物: `selfhost/ast.my`（376 行）/ `selfhost/parser.my`（1034 行）/ `selfhost/dump_ast.my`
 - 検証: AST のダンプ（S 式形式）が C 版と一致する
+  → **AST 一致 304 件・構文エラーの位置一致 37 件**。3 つの脱糖（elif / 複合代入 / for）が
+  隠し変数の連番まで一致
+- 注記: **C 版のバグを 3 件発見して修正した**（`--dump-ast` が `import` で落ちる、
+  `ND_NONE` が改行を出さない、**利用者が `t0` という変数を書くと一時値 `%tN` と衝突する**）。
+  一時値の名前は `%t.N` にした（'.' は利用者が書けない。第11〜13章と同じ手口）。
+  第15章の `T | None` が無ければ書けない章だった
+- [→ 第17章](chapters/ch17-selfhost-parser.md)
 
 ### ⬜ 第18章 Mython で型検査器を書く
 - 成果物: `selfhost/sema.my`

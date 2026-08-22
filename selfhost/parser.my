@@ -1,0 +1,1034 @@
+# parser.my — 構文解析器（第17章）
+#
+# ★ src/parser.c の移植です。**機械的に移しています。**
+#   関数名・優先順位の階層・判定の順序を C 版と揃えてあるので、
+#   S 式が食い違ったときに diff で追えます（ch16 16.1 節の規律）。
+#
+# ⚠️ 診断の描画（src/diag.c）はまだ移植していません。
+#   位置とメッセージだけを出して止まります（第18章で本物にします）。
+import strings
+import ast
+import token
+
+
+class Parser:
+    toks: list[token.Token]
+    pos: int
+    hidden: int   # 隠し変数の連番（第11章の for の脱糖で使う）
+
+    def init(self, toks: list[token.Token]) -> None:
+        self.toks = toks
+        self.pos = 0
+        self.hidden = 0
+
+    # ── トークンの読み取り ──────────────────────────────────
+
+    def peek(self) -> token.Token:
+        return self.toks[self.pos]
+
+    # n 個先を覗く（消費しない）。EOF より先は EOF を返す
+    def peek_at(self, n: int) -> token.Token:
+        i: int = self.pos + n
+        if i >= len(self.toks):
+            i = len(self.toks) - 1
+        return self.toks[i]
+
+    def advance(self) -> token.Token:
+        t: token.Token = self.peek()
+        if t.kind != token.TK_EOF:
+            self.pos = self.pos + 1
+        return t
+
+    # 現在のトークンが指定した記号なら消費して返す。違えば None
+    def consume(self, op: str) -> token.Token | None:
+        if self.peek().is_punct(op):
+            return self.advance()
+        return None
+
+    def consume_kw(self, kw: str) -> token.Token | None:
+        if self.peek().is_kw(kw):
+            return self.advance()
+        return None
+
+    # ノードの代表トークンを取り出す。
+    # ★ 「起きないはず」を panic で受けるのは、C 版の UNREACHABLE() と同じ手です。
+    def tok_of(self, n: ast.Node) -> token.Token:
+        t: token.Token | None = n.tok
+        if t is None:
+            # ⚠️ panic は戻りませんが、stage0 の到達可能性検査はそれを知りません
+            #   （C 版の _Noreturn にあたる印が無い）。else で書きます。
+            panic("parser: node without token")
+            return self.peek()
+        else:
+            return t
+
+    def fail(self, t: token.Token, msg: str) -> None:
+        panic(t.file + ":" + str(t.line) + ":" + str(t.dcol) + ": error: " + msg)
+
+    def expect_close(self, close: str, open_tok: token.Token) -> token.Token:
+        t: token.Token = self.peek()
+        if t.is_punct(close):
+            return self.advance()
+        self.fail(t, "閉じ括弧 '" + close + "' がありません")
+        return t
+
+    def expect(self, kind: int, what: str) -> token.Token:
+        t: token.Token = self.peek()
+        if t.kind == kind:
+            return self.advance()
+        self.fail(t, what + "が必要です")
+        return t
+
+    def expect_newline(self) -> None:
+        self.expect(token.TK_NEWLINE, "改行")
+
+    def expect_colon(self, what: str) -> None:
+        if self.consume(":") is None:
+            self.fail(self.peek(), what + "の後に ':' が必要です")
+
+    # ── 式（優先順位の階層。C 版と同じ順序で並べる）────────
+
+    # primary ::= INT | STR | IDENT | None | True | False | "(" expr ")" | list
+    def primary(self) -> ast.Node:
+        open_tok: token.Token | None = self.consume("(")
+        if open_tok is not None:
+            n: ast.Node = self.expr()
+            self.expect_close(")", open_tok)
+            return n
+
+        t: token.Token = self.peek()
+        if t.kind == token.TK_INT:
+            self.advance()
+            return ast.new_int_node(t, t.ival)
+        if t.kind == token.TK_IDENT:
+            self.advance()
+            return ast.new_var_node(t, t.text)
+        if t.kind == token.TK_STR:
+            self.advance()
+            return ast.new_str_node(t, t.text, t.slen)
+
+        # None リテラル（第15章）
+        if t.is_kw("None"):
+            self.advance()
+            return ast.new_node(ast.ND_NONE, t)
+
+        # リストリテラル [1, 2, 3]（第10章）
+        if t.is_punct("["):
+            self.advance()
+            n2: ast.Node = ast.new_node(ast.ND_LIST, t)
+            head: ast.Node = ast.new_node(ast.ND_BLOCK, t)   # ダミーの先頭
+            cur: ast.Node = head
+            if not self.peek().is_punct("]"):
+                while True:
+                    cur.next = self.expr()
+                    nx: ast.Node | None = cur.next
+                    if nx is None:
+                        panic("parser: unreachable")
+                    else:
+                        cur = nx
+                    if self.consume(",") is None:
+                        break
+                    if self.peek().is_punct("]"):
+                        break   # 末尾のカンマを許す
+            self.expect_close("]", t)
+            n2.body = head.next
+            return n2
+
+        # True / False は予約語だが式として使える
+        # ★ 「予約語はエラー」の判定より前に置くこと
+        if t.is_kw("True"):
+            self.advance()
+            return ast.new_bool_node(t, True)
+        if t.is_kw("False"):
+            self.advance()
+            return ast.new_bool_node(t, False)
+
+        if t.kind == token.TK_KEYWORD:
+            self.fail(t, "'" + t.text + "' は予約語です")
+        self.fail(t, "式が必要です")
+        return ast.new_node(ast.ND_PASS, t)
+
+    # postfix ::= primary { "[" expr "]" | "." IDENT [ "(" args ")" ] | "(" args ")" }
+    def postfix(self) -> ast.Node:
+        n: ast.Node = self.primary()
+
+        while True:
+            open_tok: token.Token = self.peek()
+
+            # 添字 xs[i]（第10章）
+            if self.consume("[") is not None:
+                idx: ast.Node = ast.new_node(ast.ND_INDEX, open_tok)
+                idx.lhs = n
+                idx.rhs = self.expr()
+                self.expect_close("]", open_tok)
+                n = idx
+                continue
+
+            # メソッド呼び出し / フィールドアクセス（第10・12章）
+            if self.consume(".") is not None:
+                name_tok: token.Token = self.peek()
+                if name_tok.kind != token.TK_IDENT:
+                    self.fail(name_tok, "フィールド名かメソッド名が必要です")
+                self.advance()
+
+                mopen: token.Token = self.peek()
+                if not mopen.is_punct("("):
+                    f: ast.Node = ast.new_node(ast.ND_FIELD, name_tok)
+                    f.lhs = n
+                    f.name = name_tok.text
+                    n = f
+                    continue
+                self.advance()
+
+                m: ast.Node = ast.new_node(ast.ND_METHOD, name_tok)
+                m.lhs = n
+                m.name = name_tok.text
+                m.args = self.arg_list(mopen)
+                n = m
+                continue
+
+            if self.consume("(") is None:
+                return n
+
+            # 呼べるのは名前だけ（第一級関数は v1 未対応）
+            if n.kind != ast.ND_VAR:
+                self.fail(self.peek(), "この式は呼び出せません")
+
+            call: ast.Node = ast.new_node(ast.ND_CALL, n.tok)
+            call.name = n.name
+            call.args = self.arg_list(open_tok)
+            n = call
+        return n
+
+    # 引数リストを読む（閉じ括弧まで）。C 版は各所に展開されているが、
+    # Mython 版はダミー先頭の扱いが冗長になるので 1 か所にまとめる。
+    def arg_list(self, open_tok: token.Token) -> ast.Node | None:
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, open_tok)
+        cur: ast.Node = head
+        if not self.peek().is_punct(")"):
+            while True:
+                cur.next = self.expr()
+                nx: ast.Node | None = cur.next
+                if nx is None:
+                    panic("parser: unreachable")
+                else:
+                    cur = nx
+                if self.consume(",") is None:
+                    break
+        self.expect_close(")", open_tok)
+        return head.next
+
+    # power ::= postfix [ "**" unary ]（右結合）
+    def power(self) -> ast.Node:
+        base: ast.Node = self.postfix()
+        t: token.Token = self.peek()
+        if self.consume("**") is not None:
+            return ast.new_binop_node(t, ast.OP_POW, base, self.unary())
+        return base
+
+    # unary ::= ("-" | "+" | "~") unary | power（右結合）
+    def unary(self) -> ast.Node:
+        t: token.Token = self.peek()
+        if self.consume("-") is not None:
+            return ast.new_unary_node(t, ast.OP_NEG, self.unary())
+        if self.consume("+") is not None:
+            return ast.new_unary_node(t, ast.OP_POS, self.unary())
+        if self.consume("~") is not None:
+            return ast.new_unary_node(t, ast.OP_BITNOT, self.unary())
+        return self.power()
+
+    # mul_expr ::= unary { ("*" | "/" | "//" | "%") unary }（左結合）
+    def mul_expr(self) -> ast.Node:
+        lhs: ast.Node = self.unary()
+        while True:
+            t: token.Token = self.peek()
+            # ★ "//" を "/" より先に判定すること
+            if self.consume("//") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_FLOORDIV, lhs, self.unary())
+            elif self.consume("*") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_MUL, lhs, self.unary())
+            elif self.consume("/") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_TRUEDIV, lhs, self.unary())
+            elif self.consume("%") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_MOD, lhs, self.unary())
+            else:
+                return lhs
+        return lhs
+
+    def add_expr(self) -> ast.Node:
+        lhs: ast.Node = self.mul_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume("+") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_ADD, lhs, self.mul_expr())
+            elif self.consume("-") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_SUB, lhs, self.mul_expr())
+            else:
+                return lhs
+        return lhs
+
+    def shift_expr(self) -> ast.Node:
+        lhs: ast.Node = self.add_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume("<<") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_SHL, lhs, self.add_expr())
+            elif self.consume(">>") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_SHR, lhs, self.add_expr())
+            else:
+                return lhs
+        return lhs
+
+    def bitand_expr(self) -> ast.Node:
+        lhs: ast.Node = self.shift_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume("&") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_BITAND, lhs, self.shift_expr())
+            else:
+                return lhs
+        return lhs
+
+    def bitxor_expr(self) -> ast.Node:
+        lhs: ast.Node = self.bitand_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume("^") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_BITXOR, lhs, self.bitand_expr())
+            else:
+                return lhs
+        return lhs
+
+    def bitor_expr(self) -> ast.Node:
+        lhs: ast.Node = self.bitxor_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume("|") is not None:
+                lhs = ast.new_binop_node(t, ast.OP_BITOR, lhs, self.bitxor_expr())
+            else:
+                return lhs
+        return lhs
+
+    # 比較演算子なら対応する OpKind を返す。違えば -1
+    def compare_op(self, t: token.Token) -> int:
+        if t.is_punct("=="):
+            return ast.OP_EQ
+        if t.is_punct("!="):
+            return ast.OP_NE
+        if t.is_punct("<="):
+            return ast.OP_LE
+        if t.is_punct(">="):
+            return ast.OP_GE
+        if t.is_punct("<"):
+            return ast.OP_LT
+        if t.is_punct(">"):
+            return ast.OP_GT
+        return -1
+
+    # comparison ::= bitor_expr [ compop bitor_expr ]
+    # ⚠️ 連鎖しません（while ではなく if）
+    def comparison(self) -> ast.Node:
+        lhs: ast.Node = self.bitor_expr()
+
+        # ★ 第15章：is / is not。右辺は None だけを許す（sema が検査）
+        is_tok: token.Token = self.peek()
+        if is_tok.is_kw("is"):
+            self.advance()
+            op: int = ast.OP_IS
+            if self.consume_kw("not") is not None:
+                op = ast.OP_ISNOT
+            return ast.new_binop_node(is_tok, op, lhs, self.bitor_expr())
+
+        t: token.Token = self.peek()
+        cop: int = self.compare_op(t)
+        if cop < 0:
+            return lhs
+        self.advance()
+
+        rhs: ast.Node = self.bitor_expr()
+
+        # ★ 比較の連鎖を禁止する（構文の段階で捕まえる）
+        if self.compare_op(self.peek()) >= 0:
+            self.fail(self.peek(), "比較演算子を連鎖させることはできません")
+
+        return ast.new_binop_node(t, cop, lhs, rhs)
+
+    # not_expr ::= "not" not_expr | comparison（右結合）
+    def not_expr(self) -> ast.Node:
+        t: token.Token = self.peek()
+        if self.consume_kw("not") is not None:
+            return ast.new_unary_node(t, ast.OP_NOT, self.not_expr())
+        return self.comparison()
+
+    # and_expr ::= not_expr { "and" not_expr }
+    def and_expr(self) -> ast.Node:
+        lhs: ast.Node = self.not_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume_kw("and") is not None:
+                lhs = ast.new_logical_node(t, ast.OP_AND, lhs, self.not_expr())
+            else:
+                return lhs
+        return lhs
+
+    # or_expr ::= and_expr { "or" and_expr }
+    def or_expr(self) -> ast.Node:
+        lhs: ast.Node = self.and_expr()
+        while True:
+            t: token.Token = self.peek()
+            if self.consume_kw("or") is not None:
+                lhs = ast.new_logical_node(t, ast.OP_OR, lhs, self.and_expr())
+            else:
+                return lhs
+        return lhs
+
+    def expr(self) -> ast.Node:
+        return self.or_expr()
+
+    # ── 文 ──────────────────────────────────────────────────
+
+    # var_decl ::= IDENT ":" type "=" expr
+    def var_decl(self) -> ast.Node:
+        name_tok: token.Token = self.advance()   # IDENT（呼び出し元が確認済み）
+        self.advance()                           # ":"
+
+        tr: ast.Node = self.type_ref("型注釈には型名を書きます（例: x: int = 0）")
+
+        if not self.peek().is_punct("="):
+            self.fail(self.peek(), "変数宣言には初期化式が必要です")
+        self.advance()   # "="
+
+        n: ast.Node = ast.new_node(ast.ND_VARDECL, name_tok)
+        n.name = name_tok.text
+        n.type_ref = tr
+        n.rhs = self.expr()
+        return n
+
+    # 複合代入の記号なら、対応する演算子を返す。違えば -1
+    def aug_op(self, t: token.Token) -> int:
+        if t.is_punct("+="):
+            return ast.OP_ADD
+        if t.is_punct("-="):
+            return ast.OP_SUB
+        if t.is_punct("*="):
+            return ast.OP_MUL
+        if t.is_punct("//="):
+            return ast.OP_FLOORDIV
+        if t.is_punct("%="):
+            return ast.OP_MOD
+        return -1
+
+    # 脱糖で作る隠し変数の名前。
+    # ⚠️ 連番の振り方まで C 版と揃えること（S 式に名前が出るため）
+    def hidden_name(self, tag: str) -> str:
+        name: str = tag + "." + str(self.hidden)
+        self.hidden = self.hidden + 1
+        return name
+
+    # 隠し変数の宣言（型注釈なし = 初期化式の型を使う。第11章）
+    def hidden_decl(self, tok: token.Token | None, name: str,
+                    init: ast.Node | None) -> ast.Node:
+        n: ast.Node = ast.new_node(ast.ND_VARDECL, tok)
+        n.name = name
+        n.rhs = init
+        return n
+
+    # 代入先と同じ形のノードを、対象を隠し変数に差し替えて作り直す
+    def retarget(self, target: ast.Node, obj: str, idx: str) -> ast.Node:
+        n: ast.Node = ast.new_node(target.kind, target.tok)
+        n.lhs = ast.new_var_node(target.tok, obj)
+        if target.kind == ast.ND_INDEX:
+            n.rhs = ast.new_var_node(target.tok, idx)
+        else:
+            n.name = target.name   # ND_FIELD
+        return n
+
+    # 複合代入の脱糖（言語仕様 5.2）
+    def aug_assign(self, t: token.Token, op: int, target: ast.Node,
+                   rhs: ast.Node) -> ast.Node:
+        # 変数はそのまま（2 回評価しても副作用がない）
+        if target.kind == ast.ND_VAR:
+            n: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
+            n.lhs = target
+            n.rhs = ast.new_binop_node(t, op,
+                                       ast.new_var_node(target.tok, target.name),
+                                       rhs)
+            return n
+
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        cur: ast.Node = head
+
+        obj: str = self.hidden_name("aug.obj")
+        decl: ast.Node = self.hidden_decl(target.tok, obj, target.lhs)
+        cur.next = decl
+        cur = decl
+
+        idx: str = ""
+        if target.kind == ast.ND_INDEX:
+            idx = self.hidden_name("aug.idx")
+            decl2: ast.Node = self.hidden_decl(target.tok, idx, target.rhs)
+            cur.next = decl2
+            cur = decl2
+
+        asg: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
+        asg.lhs = self.retarget(target, obj, idx)                    # 書き
+        asg.rhs = ast.new_binop_node(t, op, self.retarget(target, obj, idx),
+                                     rhs)                            # 読み
+        cur.next = asg
+
+        # 隠し変数をこの文の中に閉じ込めるため、ブロックで包む
+        blk: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        blk.body = head.next
+        return blk
+
+    # simple_stmt ::= var_decl | assign_stmt | expr_stmt
+    def simple_stmt(self) -> ast.Node:
+        t0: token.Token = self.peek()
+
+        if t0.is_kw("break"):
+            self.advance()
+            return ast.new_node(ast.ND_BREAK, t0)
+        if t0.is_kw("continue"):
+            self.advance()
+            return ast.new_node(ast.ND_CONTINUE, t0)
+        if t0.is_kw("pass"):
+            self.advance()
+            return ast.new_node(ast.ND_PASS, t0)
+
+        # return_stmt ::= "return" [ expr ]
+        if t0.is_kw("return"):
+            self.advance()
+            r: ast.Node = ast.new_node(ast.ND_RETURN, t0)
+            # 値の有無は「次が改行か」で判断する
+            if self.peek().kind != token.TK_NEWLINE:
+                r.lhs = self.expr()
+            return r
+
+        # IDENT の次が ':' なら変数宣言（2 トークン先読み）
+        if self.peek().kind == token.TK_IDENT and self.peek_at(1).is_punct(":"):
+            return self.var_decl()
+
+        lhs: ast.Node = self.expr()
+        t: token.Token = self.peek()
+
+        aug: int = self.aug_op(t)
+        if not t.is_punct("=") and aug < 0:
+            # 式文になれるのは呼び出しだけ
+            # ⚠️ 位置は「左辺のトークン」（C 版と揃える）
+            if lhs.kind != ast.ND_CALL and lhs.kind != ast.ND_METHOD:
+                self.fail(self.tok_of(lhs), "この式は文として書けません")
+            return lhs
+
+        # ここから代入。左辺が代入先になれるか確認する
+        if (lhs.kind != ast.ND_VAR and lhs.kind != ast.ND_INDEX and
+                lhs.kind != ast.ND_FIELD):
+            self.fail(self.tok_of(lhs), "この式には代入できません")
+        self.advance()   # "=" または複合代入記号
+
+        rhs: ast.Node = self.expr()
+
+        if aug >= 0:
+            return self.aug_assign(t, aug, lhs, rhs)
+
+        n2: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
+        n2.lhs = lhs
+        n2.rhs = rhs
+        return n2
+
+    # block ::= NEWLINE INDENT stmt { stmt } DEDENT
+    def block(self) -> ast.Node:
+        head_tok: token.Token = self.peek()
+
+        self.expect(token.TK_NEWLINE, "改行")
+        self.expect(token.TK_INDENT, "字下げされたブロック")
+
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, head_tok)
+        cur: ast.Node = head
+        # ⚠️ TK_EOF も終了条件に入れる（万一のときの無限ループ避け）
+        while (self.peek().kind != token.TK_DEDENT and
+               self.peek().kind != token.TK_EOF):
+            st: ast.Node = self.stmt()
+            cur.next = st
+            cur = st
+        self.expect(token.TK_DEDENT, "ブロックの終わり")
+
+        blk: ast.Node = ast.new_node(ast.ND_BLOCK, head_tok)
+        blk.body = head.next
+        return blk
+
+    # if_stmt ::= "if" expr ":" block { "elif" ... } [ "else" ":" block ]
+    #
+    # ★ elif は「else の中に if が 1 個ある」形に脱糖する（再帰 1 行）
+    def if_stmt(self) -> ast.Node:
+        t: token.Token = self.advance()   # "if" または "elif"
+
+        n: ast.Node = ast.new_node(ast.ND_IF, t)
+        n.lhs = self.expr()
+        self.expect_colon("if の条件")
+        n.body = self.block()
+
+        if self.peek().is_kw("elif"):
+            n.els = self.if_stmt()
+        elif self.consume_kw("else") is not None:
+            self.expect_colon("'else'")
+            n.els = self.block()
+        return n
+
+    # for_stmt ::= "for" IDENT "in" expr ":" block
+    #
+    # ★ for は while への脱糖（第11章）。隠し変数の連番まで C 版に揃える。
+    def for_stmt(self) -> ast.Node:
+        t: token.Token = self.advance()   # "for"
+
+        var_tok: token.Token = self.peek()
+        if var_tok.kind != token.TK_IDENT:
+            self.fail(var_tok, "ループ変数の名前が必要です")
+        self.advance()
+
+        if self.consume_kw("in") is None:
+            self.fail(self.peek(), "'in' が必要です")
+
+        # range(...) は特別扱い（言語仕様 5.5）
+        is_range: bool = (self.peek().kind == token.TK_IDENT and
+                          self.peek().text == "range" and
+                          self.peek_at(1).is_punct("("))
+
+        iter_: ast.Node | None = None
+        start: ast.Node | None = None
+        stop: ast.Node | None = None
+        step: int = 1
+
+        if is_range:
+            self.advance()                              # "range"
+            open_tok: token.Token = self.advance()      # "("
+
+            a1: ast.Node = self.expr()
+            a2: ast.Node | None = None
+            a3: ast.Node | None = None
+            if self.consume(",") is not None:
+                a2 = self.expr()
+            if self.consume(",") is not None:
+                a3 = self.expr()
+            self.expect_close(")", open_tok)
+
+            if a2 is None:
+                start = ast.new_int_node(t, 0)
+                stop = a1
+            else:
+                start = a1
+                stop = a2
+
+            if a3 is not None:
+                # ⚠️ 増分は整数リテラルだけ（v1 の制限）
+                sign: int = 1
+                lit: ast.Node = a3
+                if lit.kind == ast.ND_UNARY and lit.op == ast.OP_NEG:
+                    sign = -1
+                    inner: ast.Node | None = lit.lhs
+                    if inner is None:
+                        panic("parser: unary without operand")
+                    else:
+                        lit = inner
+                if lit.kind != ast.ND_INT:
+                    self.fail(self.tok_of(a3), "range の増分が定数ではありません")
+                step = sign * lit.ival
+                if step == 0:
+                    self.fail(self.tok_of(a3), "range の増分に 0 は使えません")
+        else:
+            iter_ = self.expr()
+
+        self.expect_colon("for の対象")
+        body: ast.Node = self.block()
+
+        # ── ここから脱糖 ──
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        cur: ast.Node = head
+
+        ix: str = self.hidden_name("for.ix")
+        cond: ast.Node = ast.new_int_node(t, 0)   # 下で必ず入れ替える
+        bind: ast.Node = ast.new_node(ast.ND_PASS, t)
+
+        if is_range:
+            # for.ix.N: int = start
+            d1: ast.Node = self.hidden_decl(t, ix, start)
+            cur.next = d1
+            cur = d1
+
+            # 増分の符号で条件の向きが変わる
+            cmp_op: int = ast.OP_LT
+            if step <= 0:
+                cmp_op = ast.OP_GT
+            if stop is None:
+                panic("parser: range without stop")
+            else:
+                cond = ast.new_binop_node(t, cmp_op, ast.new_var_node(t, ix), stop)
+
+            # x = for.ix.N
+            bind = self.hidden_decl(t, var_tok.text, ast.new_var_node(t, ix))
+        else:
+            # for.it.N = <対象>（★ 1 回だけ評価する）
+            it: str = self.hidden_name("for.it")
+            d2: ast.Node = self.hidden_decl(t, it, iter_)
+            cur.next = d2
+            cur = d2
+
+            # for.ix.N: int = 0
+            d3: ast.Node = self.hidden_decl(t, ix, ast.new_int_node(t, 0))
+            cur.next = d3
+            cur = d3
+
+            # for.ix.N < len(for.it.N)
+            lencall: ast.Node = ast.new_node(ast.ND_CALL, t)
+            lencall.name = "len"
+            lencall.args = ast.new_var_node(t, it)
+            cond = ast.new_binop_node(t, ast.OP_LT, ast.new_var_node(t, ix),
+                                      lencall)
+
+            # x = for.it.N[for.ix.N]
+            idxn: ast.Node = ast.new_node(ast.ND_INDEX, t)
+            idxn.lhs = ast.new_var_node(t, it)
+            idxn.rhs = ast.new_var_node(t, ix)
+            bind = self.hidden_decl(t, var_tok.text, idxn)
+
+        # 本体の先頭にループ変数の束縛を差し込む
+        bind.next = body.body
+        body.body = bind
+
+        # for.ix.N += 1（または step）— ★ continue の飛び先になる
+        inc: ast.Node = ast.new_node(ast.ND_ASSIGN, t)
+        inc.lhs = ast.new_var_node(t, ix)
+        inc.rhs = ast.new_binop_node(t, ast.OP_ADD, ast.new_var_node(t, ix),
+                                     ast.new_int_node(t, step))
+
+        wh: ast.Node = ast.new_node(ast.ND_WHILE, t)
+        wh.lhs = cond
+        wh.body = body
+        wh.incr = inc
+
+        cur.next = wh
+
+        blk: ast.Node = ast.new_node(ast.ND_BLOCK, t)
+        blk.body = head.next
+        return blk
+
+    # while_stmt ::= "while" expr ":" block
+    def while_stmt(self) -> ast.Node:
+        t: token.Token = self.advance()   # "while"
+
+        n: ast.Node = ast.new_node(ast.ND_WHILE, t)
+        n.lhs = self.expr()
+        self.expect_colon("while の条件")
+        n.body = self.block()
+        return n
+
+    # stmt ::= simple_stmt NEWLINE | if_stmt | while_stmt | for_stmt
+    def stmt(self) -> ast.Node:
+        t: token.Token = self.peek()
+
+        if t.is_kw("if"):
+            return self.if_stmt()
+        if t.is_kw("while"):
+            return self.while_stmt()
+        if t.is_kw("for"):
+            return self.for_stmt()
+
+        # 対応する if が無い elif / else
+        if t.is_kw("elif") or t.is_kw("else"):
+            self.fail(t, "対応する if がない '" + t.text + "' です")
+
+        s: ast.Node = self.simple_stmt()
+        self.expect_newline()
+        return s
+
+    # ── 型注釈 ──────────────────────────────────────────────
+
+    def type_name_token(self, what: str) -> token.Token:
+        t: token.Token = self.peek()
+        if t.kind == token.TK_IDENT or t.is_kw("None"):
+            self.advance()
+            return t
+        self.fail(t, "型名が必要です（" + what + "）")
+        return t
+
+    # type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ] [ "|" None ]
+    def type_ref(self, what: str) -> ast.Node:
+        t: token.Token = self.type_name_token(what)
+
+        n: ast.Node = ast.new_node(ast.ND_TYPEREF, t)
+        n.name = t.text
+
+        # モジュール修飾 lexer.Token（★ 1 段だけ）
+        if self.peek().is_punct("."):
+            self.advance()
+            m: token.Token = self.type_name_token("モジュール修飾の後には型名を書きます")
+            n.mod_name = n.name
+            n.name = m.text
+            n.tok = m
+            if self.peek().is_punct("."):
+                self.fail(self.peek(),
+                          "モジュールの修飾は 1 段だけです（パッケージはありません）")
+
+        open_tok: token.Token = self.peek()
+        if self.consume("[") is not None:
+            n.lhs = self.type_ref("要素型を書いてください（例: list[int]）")
+            self.expect_close("]", open_tok)
+
+        # ★ 第15章：T | None
+        if self.peek().is_punct("|"):
+            bar: token.Token = self.advance()
+            if not self.peek().is_kw("None"):
+                self.fail(self.peek(),
+                          "型の '|' の後ろに書けるのは None だけです（共用体型はありません）")
+            self.advance()
+            n.nullable = True
+            n.tok = bar
+        return n
+
+    # param ::= IDENT ":" type（メソッドの第 1 引数 self だけ型注釈なし）
+    def param(self, allow_self: bool) -> ast.Node:
+        name_tok: token.Token = self.peek()
+        if name_tok.kind != token.TK_IDENT:
+            self.fail(name_tok, "引数名が必要です")
+        self.advance()
+
+        if (allow_self and name_tok.text == "self" and
+                not self.peek().is_punct(":")):
+            n0: ast.Node = ast.new_node(ast.ND_PARAM, name_tok)
+            n0.name = name_tok.text
+            return n0   # type_ref は None のまま（sema がクラスの型を入れる）
+
+        if self.consume(":") is None:
+            self.fail(self.peek(), "引数名の後に ':' が必要です")
+
+        tr: ast.Node = self.type_ref("引数には型注釈が必須です（例: n: int）")
+
+        n: ast.Node = ast.new_node(ast.ND_PARAM, name_tok)
+        n.name = name_tok.text
+        n.type_ref = tr
+        return n
+
+    # 引数リスト（仮引数）を読む
+    def param_list(self, open_tok: token.Token, in_class: bool) -> ast.Node | None:
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, open_tok)
+        cur: ast.Node = head
+        first: bool = True
+        if not self.peek().is_punct(")"):
+            while True:
+                # self を書けるのは「クラス本体の中の、第 1 引数」だけ
+                pm: ast.Node = self.param(in_class and first)
+                first = False
+                cur.next = pm
+                cur = pm
+                if self.consume(",") is None:
+                    break
+        self.expect_close(")", open_tok)
+        return head.next
+
+    # func_def ::= "def" IDENT "(" [ params ] ")" "->" type ":" block
+    def func_def(self, in_class: bool) -> ast.Node:
+        kw: token.Token = self.advance()   # "def"
+
+        name_tok: token.Token = self.peek()
+        if name_tok.kind != token.TK_IDENT:
+            self.fail(name_tok, "関数名が必要です")
+        self.advance()
+
+        n: ast.Node = ast.new_node(ast.ND_FUNC, kw)
+        n.name = name_tok.text
+
+        open_tok: token.Token = self.peek()
+        if self.consume("(") is None:
+            self.fail(open_tok, "'(' が必要です")
+
+        n.params = self.param_list(open_tok, in_class)
+
+        # メソッドの第 1 引数は self でなければならない（言語仕様 5.10）
+        if in_class:
+            p0: ast.Node | None = n.params
+            if p0 is None:
+                self.fail(name_tok,
+                          "メソッド '" + n.name + "' の第 1 引数は self でなければなりません")
+            elif p0.name != "self":
+                # ⚠️ 位置は「第 1 引数」（C 版と揃える）
+                self.fail(self.tok_of(p0),
+                          "メソッド '" + n.name + "' の第 1 引数は self でなければなりません")
+
+        # 戻り型は必須（言語仕様 3.3）
+        if self.consume("->") is None:
+            self.fail(self.peek(), "'->' と戻り型が必要です")
+
+        n.type_ref = self.type_ref("戻り型には型名を書きます（例: -> int / -> None）")
+
+        self.expect_colon("def の宣言")
+        n.body = self.block()
+        return n
+
+    # field_decl ::= IDENT ":" type NEWLINE（初期化式は取らない）
+    def field_decl(self) -> ast.Node:
+        name_tok: token.Token = self.advance()   # IDENT
+        self.advance()                           # ":"
+
+        n: ast.Node = ast.new_node(ast.ND_FIELDDECL, name_tok)
+        n.name = name_tok.text
+        n.type_ref = self.type_ref("フィールドには型注釈が必須です（例: kind: int）")
+
+        if self.peek().is_punct("="):
+            self.fail(self.peek(), "フィールドに初期値は書けません")
+        self.expect_newline()
+        return n
+
+    # class_def ::= "class" IDENT ":" NEWLINE INDENT { field } { method } DEDENT
+    def class_def(self) -> ast.Node:
+        kw: token.Token = self.advance()   # "class"
+
+        name_tok: token.Token = self.peek()
+        if name_tok.kind != token.TK_IDENT:
+            self.fail(name_tok, "クラス名が必要です")
+        self.advance()
+
+        n: ast.Node = ast.new_node(ast.ND_CLASS, kw)
+        n.name = name_tok.text
+
+        self.expect_colon("class の宣言")
+        self.expect(token.TK_NEWLINE, "改行")
+        self.expect(token.TK_INDENT, "字下げされたクラス本体")
+
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, kw)
+        cur: ast.Node = head
+        saw_method: bool = False
+
+        while (self.peek().kind != token.TK_DEDENT and
+               self.peek().kind != token.TK_EOF):
+            t: token.Token = self.peek()
+
+            if t.is_kw("def"):
+                m: ast.Node = self.func_def(True)   # ★ True = self を書ける
+                cur.next = m
+                cur = m
+                saw_method = True
+                continue
+
+            if t.kind == token.TK_IDENT and self.peek_at(1).is_punct(":"):
+                # ⚠️ フィールドはメソッドより先（文法がそう決めている）
+                if saw_method:
+                    self.fail(t, "フィールドはメソッドより前に書いてください")
+                f: ast.Node = self.field_decl()
+                cur.next = f
+                cur = f
+                continue
+
+            self.fail(t, "クラスの中に書けるのはフィールドとメソッドだけです")
+        self.expect(token.TK_DEDENT, "クラス本体の終わり")
+
+        n.body = head.next
+        return n
+
+    # extern_def ::= "extern" "def" IDENT "(" [ params ] ")" "->" type NEWLINE
+    #
+    # ★ 新しいノード種別は作らない。body が None——「宣言はあるが定義がない」
+    def extern_def(self) -> ast.Node:
+        self.advance()   # "extern"
+
+        if not self.peek().is_kw("def"):
+            self.fail(self.peek(), "extern の後に def が必要です")
+        self.advance()   # "def"
+
+        name_tok: token.Token = self.peek()
+        if name_tok.kind != token.TK_IDENT:
+            self.fail(name_tok, "関数名が必要です")
+        self.advance()
+
+        open_tok: token.Token = self.peek()
+        if self.consume("(") is None:
+            self.fail(self.peek(), "'(' が必要です")
+
+        params: ast.Node | None = self.param_list(open_tok, False)
+
+        if self.consume("->") is None:
+            self.fail(self.peek(), "'->' が必要です")
+
+        n: ast.Node = ast.new_node(ast.ND_FUNC, name_tok)
+        n.name = name_tok.text
+        n.params = params
+        n.type_ref = self.type_ref("戻り型を書いてください（例: -> int）")
+
+        # ⚠️ 本体は読まない
+        if self.peek().is_punct(":"):
+            self.fail(self.peek(), "extern def に ':' は書けません")
+        self.expect_newline()
+
+        return n   # body は None のまま（★ extern の印）
+
+    # import_stmt ::= "import" IDENT NEWLINE
+    def import_stmt(self) -> ast.Node:
+        kw: token.Token = self.advance()   # "import"
+
+        name_tok: token.Token = self.peek()
+        if name_tok.kind != token.TK_IDENT:
+            self.fail(name_tok, "モジュール名が必要です")
+        self.advance()
+
+        if self.peek().is_punct("."):
+            self.fail(self.peek(), "モジュール名にドットは使えません")
+
+        n: ast.Node = ast.new_node(ast.ND_IMPORT, kw)
+        n.name = name_tok.text
+        self.expect_newline()
+        return n
+
+    # program ::= { class_def | func_def | extern_def | import | global_var } EOF
+    def program(self) -> ast.Node:
+        head: ast.Node = ast.new_node(ast.ND_BLOCK, self.peek())
+        cur: ast.Node = head
+        first: token.Token = self.peek()
+
+        while self.peek().kind != token.TK_EOF:
+            t: token.Token = self.peek()
+
+            if t.kind == token.TK_INDENT:
+                self.fail(t, "予期しないインデントです")
+            if t.kind == token.TK_DEDENT:
+                panic("parser: unexpected DEDENT")
+
+            if t.is_kw("def"):
+                d: ast.Node = self.func_def(False)
+                cur.next = d
+                cur = d
+                continue
+
+            if t.is_kw("class"):
+                c: ast.Node = self.class_def()
+                cur.next = c
+                cur = c
+                continue
+
+            if t.is_kw("import"):
+                im: ast.Node = self.import_stmt()
+                cur.next = im
+                cur = im
+                continue
+
+            if t.is_kw("extern"):
+                ex: ast.Node = self.extern_def()
+                cur.next = ex
+                cur = ex
+                continue
+
+            # グローバル変数 ::= IDENT ":" type "=" expr NEWLINE
+            if t.kind == token.TK_IDENT and self.peek_at(1).is_punct(":"):
+                g: ast.Node = self.var_decl()
+                cur.next = g
+                cur = g
+                self.expect_newline()
+                continue
+
+            self.fail(t, "トップレベルに実行文は書けません")
+
+        blk: ast.Node = ast.new_node(ast.ND_BLOCK, first)
+        blk.body = head.next
+        return blk
+
+
+def parse(toks: list[token.Token]) -> ast.Node:
+    p: Parser = Parser(toks)
+    return p.program()

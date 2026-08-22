@@ -161,6 +161,19 @@ class Lexer:
     def col_of(self, at: int) -> int:
         return at - self.line_start + 1
 
+    # 表示用の桁（行頭からの文字数）。
+    # ⚠️ UTF-8 の継続バイト（0b10xxxxxx）は数えません。
+    #   「3 文字目」と言われて 7 バイト目を指されても、利用者には通じないためです。
+    def dcol_of(self, at: int) -> int:
+        n: int = 1
+        i: int = self.line_start
+        while i < at and i < len(self.src):
+            b: int = strings.byte_at(self.src, i)
+            if b < 128 or b >= 192:
+                n = n + 1
+            i = i + 1
+        return n
+
     def is_keyword(self, s: str) -> bool:
         i: int = 0
         while i < len(self.keywords):
@@ -173,7 +186,8 @@ class Lexer:
     #
     # 位置情報はここで一括して埋めるので、呼び出し側は kind と値だけを見る。
     def push(self, kind: int, at: int, raw: str) -> token.Token:
-        t: token.Token = token.Token(kind, self.file, self.line, self.col_of(at))
+        t: token.Token = token.Token(kind, self.file, self.line, self.col_of(at),
+                                     self.dcol_of(at))
         t.raw = raw
         self.out.append(t)
         return t
@@ -181,7 +195,7 @@ class Lexer:
     def fail(self, at: int, msg: str) -> None:
         # ⚠️ 診断の描画（src/diag.c）はまだ移植していません。
         #   位置とメッセージだけを出して止まります（ch16 16.2 節）。
-        panic(self.file + ":" + str(self.line) + ":" + str(self.col_of(at)) +
+        panic(self.file + ":" + str(self.line) + ":" + str(self.dcol_of(at)) +
               ": error: " + msg)
 
     # '\n' を 1 つ読み進め、行番号と行頭を更新する
