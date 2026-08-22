@@ -197,9 +197,16 @@ note: 対応する '(' はここです
 ここから先は、**同じコンパイラを Mython で書き直す**作業です。
 C 版（stage0）が正解を持っているので、常に出力を比較しながら進められます。
 
-### ⬜ 第16章 Mython で字句解析器を書く
-- 成果物: `selfhost/lexer.my`
+### ✅ 第16章 Mython で字句解析器を書く
+- 成果物: `selfhost/token.my` / `selfhost/lexer.my` / `selfhost/dump_tokens.my`、
+  `tests/selfhost.sh`（`make test` に組み込み）
 - 検証: 同じ入力に対し、C 版と Mython 版のトークン列が完全一致する
+  → **338 ファイルでバイト単位一致・字句エラーの位置も 9 件一致**
+- 注記: **機械的に移植し、改善しない**（違いが出たとき原因を 1 種類に絞るため）。
+  ポインタ→添字、enum→int 定数、部分文字列はコピー。
+  第15章で `str` に長さを持たせていなければ **131 倍遅かった**（実測）。
+  C 版の約 2 倍の速度で動く（1.66MB を 0.48 秒）
+- [→ 第16章](chapters/ch16-selfhost-lexer.md)
 
 ### ⬜ 第17章 Mython で構文解析器を書く
 - 成果物: `selfhost/parser.my`

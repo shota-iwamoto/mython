@@ -122,6 +122,22 @@ def strip(s: str) -> str:
         stop = stop - 1
     return substr(s, start, stop - start)
 
+# 桁揃え（第16章）。printf の %3d / %-8s の代わり。
+#
+# ★ 言語に書式指定を足すのではなく、ライブラリの関数で済ませます
+#   （第14章 14.1 節の境界線）。
+def lpad(s: str, width: int) -> str:
+    out: str = s
+    while len(out) < width:
+        out = " " + out
+    return out
+
+def rpad(s: str, width: int) -> str:
+    out: str = s
+    while len(out) < width:
+        out = out + " "
+    return out
+
 def repeat(s: str, times: int) -> str:
     out: str = ""
     for i in range(times):

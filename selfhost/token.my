@@ -1,0 +1,74 @@
+# token.my — トークンの表現（第16章）
+#
+# ★ src/lexer.h の TokenKind と Token を Mython に移したものです。
+#   値と順序は C 版に揃えます（揃えないと --dump-tokens の比較ができません）。
+#
+# ⚠️ Mython には enum がないので、グローバル定数で代用します
+#   （言語仕様 6.2：初期化式はコンパイル時定数）。
+
+TK_EOF: int = 0
+TK_INT: int = 1
+TK_PUNCT: int = 2
+TK_IDENT: int = 3
+TK_KEYWORD: int = 4
+TK_STR: int = 5
+TK_NEWLINE: int = 6
+TK_INDENT: int = 7
+TK_DEDENT: int = 8
+
+# --dump-tokens に出す名前（C 版の token_kind_name と同じ文字列）
+def kind_name(kind: int) -> str:
+    if kind == TK_EOF:
+        return "EOF"
+    if kind == TK_INT:
+        return "INT"
+    if kind == TK_PUNCT:
+        return "PUNCT"
+    if kind == TK_IDENT:
+        return "IDENT"
+    if kind == TK_KEYWORD:
+        return "KEYWORD"
+    if kind == TK_STR:
+        return "STR"
+    if kind == TK_NEWLINE:
+        return "NEWLINE"
+    if kind == TK_INDENT:
+        return "INDENT"
+    if kind == TK_DEDENT:
+        return "DEDENT"
+    panic("token.kind_name: unknown kind")
+    return ""
+
+
+class Token:
+    kind: int
+
+    # ── 位置情報（エラー報告に使う。全トークンが必ず持つ）──
+    file: str
+    line: int
+    col: int
+
+    # ── ソース上の実体 ──
+    #
+    # ⚠️ C 版は「ソースを指すポインタ + 長さ」でしたが、Mython には
+    #   ポインタがないので、その範囲を複製して持ちます（ch16 16.5 節）。
+    raw: str   # 見た目そのまま（STR なら引用符やエスケープを含む）
+    text: str  # 値（STR はエスケープ解決後 / IDENT・KEYWORD は名前）
+    ival: int  # TK_INT の値
+    slen: int  # text のバイト長
+
+    def init(self, kind: int, file: str, line: int, col: int) -> None:
+        self.kind = kind
+        self.file = file
+        self.line = line
+        self.col = col
+        self.raw = ""
+        self.text = ""
+        self.ival = 0
+        self.slen = 0
+
+    def is_punct(self, op: str) -> bool:
+        return self.kind == TK_PUNCT and self.raw == op
+
+    def is_kw(self, kw: str) -> bool:
+        return self.kind == TK_KEYWORD and self.text == kw

@@ -1,13 +1,14 @@
 # selfhost/ — Mython 製の Mython コンパイラ (stage1)
 
-**第16章から書き始めます。** 現在は空です。
+**第16章から書き始めました。** 現在は字句解析器まで（`token.my` / `lexer.my` / `dump_tokens.my`）。
 
 `src/` の C 版と **1:1 で対応**させます。この対応を崩さないでください。
 崩すと「C 版のどこを見れば正解がわかるか」が失われます。
 
 | C 版 | Mython 版 | 章 |
 |---|---|---|
-| `src/lexer.c` | `selfhost/lexer.my` | 第16章 |
+| `src/lexer.h` | `selfhost/token.my` | 第16章 ✅ |
+| `src/lexer.c` | `selfhost/lexer.my` | 第16章 ✅ |
 | `src/parser.c` | `selfhost/parser.my` | 第17章 |
 | `src/ast.c` | `selfhost/ast.my` | 第17章 |
 | `src/sema.c` | `selfhost/sema.my` | 第18章 |
@@ -19,9 +20,13 @@
 各段階で C 版が「正解」を持っていることを利用します。
 
 ```bash
-# 第16章：トークン列が一致するか
+# 第16章：トークン列が一致するか（tests/selfhost.sh が全ファイルで自動比較）
+make selfhost-test
+#   → トークン列一致 338 件 / 字句エラーの位置一致 9 件
+#
+# 1 ファイルだけ見るなら
 ./build/mythonc --dump-tokens tests/cases/x.my > /tmp/c.txt
-./build/stage1  --dump-tokens tests/cases/x.my > /tmp/m.txt
+./build/stage1-lexer          tests/cases/x.my > /tmp/m.txt
 diff /tmp/c.txt /tmp/m.txt
 
 # 第20章：不動点の検証

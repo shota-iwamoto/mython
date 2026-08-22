@@ -2,7 +2,8 @@
 #
 # 使い方:
 #   make            コンパイラをビルド
-#   make test       テストを全部実行
+#   make test       テストを全部実行（C 版のテスト + セルフホストの検証）
+#   make selfhost-test  Mython 版字句解析器と C 版のトークン列を比較
 #   make asan       AddressSanitizer 付きでビルド（メモリバグ調査用）
 #   make clean      生成物を削除
 
@@ -53,7 +54,7 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
 TARGET  := build/mythonc
 
-.PHONY: all clean test test-one asan info
+.PHONY: all clean test test-one selfhost-test asan info
 
 all: $(TARGET) $(RUNTIME_OBJ)
 
@@ -75,10 +76,17 @@ build/%.o: src/%.c
 # ── テスト ──────────────────────────────────────────────────
 test: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh
+	@tests/selfhost.sh
 
 # 1 ケースだけ実行: make test-one CASE=tests/cases/int_42.my
 test-one: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh $(CASE)
+
+# ── セルフホストの検証（第16章）─────────────────────────────
+# Mython 製の字句解析器（stage1）が C 版と同じトークン列を出すか。
+#   ★ テストケースをそのまま検証データに使います。
+selfhost-test: $(TARGET) $(RUNTIME_OBJ)
+	@tests/selfhost.sh
 
 # ── AddressSanitizer ビルド ─────────────────────────────────
 # セグフォの原因が分からないときに使います。
