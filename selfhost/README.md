@@ -1,6 +1,6 @@
 # selfhost/ — Mython 製の Mython コンパイラ (stage1)
 
-**第16章から書き始めました。** 現在は型検査器まで（字句解析・構文解析・意味解析）。
+**第16章から書き始めました。** 現在はコード生成まで（IR まで出せます）。
 
 `src/` の C 版と **1:1 で対応**させます。この対応を崩さないでください。
 崩すと「C 版のどこを見れば正解がわかるか」が失われます。
@@ -15,7 +15,7 @@
 | `src/diag.c` | `selfhost/diag.my` | 第18章 ✅ |
 | `src/types.c` | `selfhost/ast.my` に同居 | 第18章 ✅ |
 | `src/module.c` | `selfhost/module.my` | 第18章 ✅ |
-| `src/codegen.c` | `selfhost/codegen.my` | 第19章 |
+| `src/codegen.c` | `selfhost/codegen.my` | 第19章 ✅ |
 | `src/main.c` | `selfhost/main.my` | 第20章 |
 
 ## 検証方法
@@ -41,6 +41,12 @@ diff /tmp/c.txt /tmp/m.txt
 ./build/mythonc --check tests/cases/x.my 2> /tmp/c.txt
 ./build/stage1-check    tests/cases/x.my 2> /tmp/m.txt
 diff /tmp/c.txt /tmp/m.txt
+
+# 第19章：IR が一致するか／その IR が動くか
+./build/mythonc -S       tests/cases/x.my > /tmp/c.ll
+./build/stage1-codegen   tests/cases/x.my > /tmp/m.ll
+diff /tmp/c.ll /tmp/m.ll
+clang /tmp/m.ll build/runtime.o -o /tmp/x && /tmp/x
 
 # 第20章：不動点の検証
 make bootstrap    # stage2 == stage3 なら成功

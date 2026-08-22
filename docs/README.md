@@ -64,7 +64,7 @@
 | [第16章](chapters/ch16-selfhost-lexer.md) | Mython で字句解析器を書く | ✅ 完成 |
 | [第17章](chapters/ch17-selfhost-parser.md) | Mython で構文解析器を書く | ✅ 完成 |
 | [第18章](chapters/ch18-selfhost-sema.md) | Mython で型検査器を書く | ✅ 完成 |
-| 第19章 | Mython でコード生成器を書く | ⬜ 未着手 |
+| [第19章](chapters/ch19-selfhost-codegen.md) | Mython でコード生成器を書く | ✅ 完成 |
 | 第20章 | ブートストラップと不動点検証 | ⬜ 未着手 |
 
 ## 4. 作業ログ

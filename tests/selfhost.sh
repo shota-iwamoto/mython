@@ -15,6 +15,7 @@ MYTHONC="$ROOT/build/mythonc"
 STAGE1="$ROOT/build/stage1-lexer"
 STAGE1_AST="$ROOT/build/stage1-ast"
 STAGE1_CHECK="$ROOT/build/stage1-check"
+STAGE1_CODEGEN="$ROOT/build/stage1-codegen"
 TMP="$ROOT/tests/tmp"
 
 mkdir -p "$TMP"
@@ -44,6 +45,15 @@ if ! "$MYTHONC" "$ROOT/selfhost/check.my" -o "$STAGE1_CHECK" > "$TMP/stage1-buil
     cat "$TMP/stage1-build.log"
     exit 1
 fi
+if ! "$MYTHONC" "$ROOT/selfhost/emit_ir.my" -o "$STAGE1_CODEGEN" > "$TMP/stage1-build.log" 2>&1; then
+    echo "stage1-codegen のビルドに失敗しました:"
+    cat "$TMP/stage1-build.log"
+    exit 1
+fi
+
+# ★ target triple もビルド時に埋め込めないので環境変数で渡す（第19章）
+export MYTHON_TARGET_TRIPLE="$("$MYTHONC" -S "$ROOT/tests/cases/int_42.my" \
+    | sed -n 's/^target triple = "\(.*\)"$/\1/p')"
 
 if [ $# -gt 0 ]; then
     FILES=("$@")
@@ -60,7 +70,8 @@ else
     C_OK=''; C_NG=''; C_DIM=''; C_END=''
 fi
 
-pass=0; errpass=0; astpass=0; asterrpass=0; chkpass=0; chkerrpass=0; fail=0
+pass=0; errpass=0; astpass=0; asterrpass=0; chkpass=0; chkerrpass=0
+irpass=0; runpass=0; fail=0
 failed_names=()
 
 for f in "${FILES[@]}"; do
@@ -155,11 +166,51 @@ for f in "${FILES[@]}"; do
         continue
     fi
 
-    if [ "$crc" -eq 0 ]; then
-        chkpass=$((chkpass + 1))
-    else
+    if [ "$crc" -ne 0 ]; then
         chkerrpass=$((chkerrpass + 1))
+        continue
     fi
+    chkpass=$((chkpass + 1))
+
+    # ── ④ IR（第19章）──
+    "$MYTHONC" -S "$f" > "$TMP/c.ll" 2>/dev/null
+    "$STAGE1_CODEGEN" "$f" > "$TMP/m.ll" 2>"$TMP/m.err"
+
+    if ! diff -q "$TMP/c.ll" "$TMP/m.ll" > /dev/null; then
+        fail=$((fail + 1)); failed_names+=("$name")
+        printf "  %sFAIL%s  %s（IR）\n" "$C_NG" "$C_END" "$name"
+        diff "$TMP/c.ll" "$TMP/m.ll" | head -14 | sed 's/^/          /'
+        continue
+    fi
+    irpass=$((irpass + 1))
+
+    # ── ⑤ stage1 の IR が本当に動くか（第19章）──
+    #
+    # ★ 単一モジュールのケースだけ。複数モジュールの -S 出力は
+    #   区切りを入れて並べたものなので、そのままではリンクできません。
+    if grep -q '^; ── module:' "$TMP/c.ll"; then
+        continue
+    fi
+    if ! clang "$TMP/m.ll" "$ROOT/build/runtime.o" -o "$TMP/m.bin" 2>/dev/null; then
+        fail=$((fail + 1)); failed_names+=("$name")
+        printf "  %sFAIL%s  %s（stage1 の IR がリンクできない）\n" \
+               "$C_NG" "$C_END" "$name"
+        continue
+    fi
+    m_out="$("$TMP/m.bin" 2>/dev/null)"; m_rc=$?
+
+    "$MYTHONC" "$f" -o "$TMP/c.bin" 2>/dev/null
+    c_out="$("$TMP/c.bin" 2>/dev/null)"; c_rc=$?
+
+    if [ "$m_out" != "$c_out" ] || [ "$m_rc" -ne "$c_rc" ]; then
+        fail=$((fail + 1)); failed_names+=("$name")
+        printf "  %sFAIL%s  %s（stage1 の IR の実行結果が違う）\n" \
+               "$C_NG" "$C_END" "$name"
+        printf "          C : rc=%s %s\n          M : rc=%s %s\n" \
+               "$c_rc" "$c_out" "$m_rc" "$m_out"
+        continue
+    fi
+    runpass=$((runpass + 1))
 done
 
 echo
@@ -171,6 +222,8 @@ if [ "$fail" -eq 0 ]; then
            "$C_OK" "$astpass" "$asterrpass" "$C_END"
     printf "%s型検査 一致 %d 件 / 型エラーの内容一致 %d 件%s\n" \
            "$C_OK" "$chkpass" "$chkerrpass" "$C_END"
+    printf "%sIR 一致 %d 件 / stage1 の IR で実行して一致 %d 件%s\n" \
+           "$C_OK" "$irpass" "$runpass" "$C_END"
     exit 0
 else
     printf "%s%d 件一致 / %d 件不一致%s\n" "$C_NG" "$pass" "$fail" "$C_END"

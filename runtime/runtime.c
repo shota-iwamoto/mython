@@ -51,6 +51,10 @@ void *my_check_not_none(void *p) {
 
 void my_print_int(long long v) { printf("%lld\n", v); }
 
+// stdout にそのまま書く（改行を足さない）。第19章。
+// ★ print は改行を足すので、IR の出力には使えません。
+void my_print_raw(const char *s) { fputs(s, stdout); }
+
 // stderr にそのまま書く（改行は付けない）。第18章。
 //
 // ★ コンパイラは診断を stderr に書きます。print は stdout なので、
