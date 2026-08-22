@@ -50,8 +50,13 @@ typedef enum {
     ND_INDEX,    // xs[i]     → lhs（対象）, rhs（添字）
     ND_METHOD,   // xs.f(...) → lhs（対象）, name, args
 
-    // ── 第12章以降で追加していく ──
-    // ND_FIELD, ND_CLASS, ...
+    // ── 第12章：class ──
+    ND_CLASS,      // クラス定義 → name, body（メンバの列）, cls
+    ND_FIELDDECL,  // フィールド宣言 kind: int → name, type_ref
+    ND_FIELD,      // フィールドアクセス t.kind → lhs（対象）, name, field
+
+    // ── 第13章以降で追加していく ──
+    // ND_IMPORT, ...
 } NodeKind;
 
 // 演算子の種類。
@@ -101,6 +106,39 @@ static inline bool is_compare(OpKind op) { return OP_EQ <= op && op <= OP_GE; }
 const char *op_symbol(OpKind op);
 
 typedef struct Node Node;
+
+// ── クラス定義（第12章）────────────────────────────────────
+//
+// ★ types.h の Type は「どのクラスか」を struct Class * で指すだけです。
+//   中身（フィールドの並び・サイズ）はここにあります。
+//   sema が組み立て、codegen が読みます。
+
+typedef struct Field Field;
+struct Field {
+    char *name;
+    Type *type;
+    int index;   // 構造体の何番目のフィールドか（getelementptr に渡す）
+    int offset;  // 先頭から何バイト目か
+                 // ⚠️ 読み書きには使いません（LLVM が index から計算する）。
+                 //    自分のレイアウト計算が合っているかを確かめるための値です。
+    Token *tok;  // 宣言位置（「最初の宣言はここです」用）
+    Field *next;
+};
+
+typedef struct Class Class;
+struct Class {
+    char *name;
+    Token *tok;      // 定義位置
+    Field *fields;   // 宣言順
+    int nfields;
+    int size;        // インスタンス 1 個のバイト数（my_alloc に渡す）
+    int align;
+    Type *type;      // このクラスの Type（★ クラスにつき 1 個だけ作る）
+    Node *node;      // ND_CLASS（メソッドをたどるため）
+    bool has_init;   // init メソッドを持つか
+    Class *next;
+};
+
 struct Node {
     NodeKind kind;
 
@@ -136,6 +174,10 @@ struct Node {
     //         x: int = 2      ← %x（衝突！）
     //   どちらも相手を隠していないのでシャドーイングではありません。
     //   そこで sema が衝突しない名前を割り当てます（名前修飾の入口）。
+    //
+    // ★ 第12章：入口だったものが本番になりました。メソッドの定義（ND_FUNC）と
+    //   呼び出し（ND_METHOD）、コンストラクタ（ND_CALL）には、
+    //   sema が修飾名「Token.show」を入れます（記号 @ は付けない）。
     char *ir_name;
 
     // このノードがグローバル変数か（第8章）。
@@ -167,6 +209,17 @@ struct Node {
     // ND_CALL が組み込み関数のとき、sema が選んだ候補（第9章）。
     // ユーザー定義関数の呼び出しなら NULL。
     const struct Builtin_ *builtin;
+
+    // ── 第12章：class ──
+    //
+    // ★ 第9章の builtin と同じ形です。「どう扱うか」の判断は sema が済ませ、
+    //   codegen は書き込まれた記録を読むだけ。
+    //     ND_CLASS : 自分のクラス定義
+    //     ND_CALL  : NULL でなければ「インスタンス生成」（Token(1, "x")）
+    Class *cls;
+
+    // ND_FIELD が指すフィールド（sema が解決する）
+    Field *field;
 
     // ND_FUNC の仮引数リスト / ND_CALL の実引数リスト（next で連結）。第8章
     Node *params;

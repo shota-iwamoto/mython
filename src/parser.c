@@ -246,18 +246,31 @@ static Node *postfix(Parser *p) {
             continue;
         }
 
-        // メソッド呼び出し xs.append(v)（第10章）
+        // メソッド呼び出し xs.append(v)（第10章）と
+        // フィールドアクセス t.kind（第12章）。
+        //
+        // ★ どちらも "." IDENT まで同じ形です。続きが '(' かどうかで分かれます。
+        //   ループの中に分岐を 1 個足すだけなので、t.next.kind のような
+        //   連鎖も自動的に通ります。
         if (consume(p, ".")) {
             Token *name_tok = peek(p);
             if (name_tok->kind != TK_IDENT)
-                error_at_hint(name_tok, "'.' の後にはメソッド名を書きます（例: xs.append(1)）",
-                              "メソッド名が必要です");
+                error_at_hint(name_tok,
+                              "'.' の後にはフィールド名かメソッド名を書きます"
+                              "（例: t.kind / xs.append(1)）",
+                              "フィールド名かメソッド名が必要です");
             advance(p);
 
             Token *mopen = peek(p);
-            if (!consume(p, "("))
-                error_at_hint(mopen, "フィールドへのアクセスは第12章で対応します",
-                              "メソッド呼び出しの '(' が必要です");
+            if (!tok_is(mopen, "(")) {
+                // フィールドアクセス（第12章。第10章の予告を回収）
+                Node *f = new_node(ND_FIELD, name_tok);
+                f->lhs = n;
+                f->name = name_tok->text;
+                n = f;
+                continue;
+            }
+            advance(p);  // "("
 
             Node *m = new_node(ND_METHOD, name_tok);
             m->lhs = n;
@@ -558,6 +571,71 @@ static int aug_op(Token *t) {
     return -1;
 }
 
+// 脱糖で使う道具（実体は for 文のところにあります。第11章）
+static char *hidden_name(Parser *p, const char *tag);
+static Node *hidden_decl(Token *tok, char *name, Node *init);
+
+// 代入先と同じ形のノードを、対象を隠し変数に差し替えて作り直す。
+//
+// ★ 「読み」と「書き」で 2 つ作ります。同じノードを使い回しても動きますが、
+//   1 つのノードが木の 2 か所に現れるのは（sema が 2 回検査することになり）
+//   後から読む人を必ず混乱させます。
+static Node *retarget(Node *target, char *obj, char *idx) {
+    Node *n = new_node(target->kind, target->tok);
+    n->lhs = new_var_node(target->tok, obj);
+    if (target->kind == ND_INDEX) n->rhs = new_var_node(target->tok, idx);
+    else n->name = target->name;  // ND_FIELD
+    return n;
+}
+
+// 複合代入の脱糖（言語仕様 5.2）。
+//
+//   x += e      →  x = x + e
+//
+//   t.f += e    →  aug.obj.0 = t              ← 対象は 1 回だけ評価する
+//                  aug.obj.0.f = aug.obj.0.f + e
+//
+//   xs[i] += e  →  aug.obj.0 = xs
+//                  aug.idx.1 = i               ← 添字も 1 回だけ
+//                  aug.obj.0[aug.idx.1] = aug.obj.0[aug.idx.1] + e
+//
+// ⚠️ 第5章に「第10章で必要になる」と予告した書き換えです。実際には第12章まで
+//    先送りされ、その間 xs[f()] += 1 は**コンパイラを落としていました**
+//    （左辺を変数だと決め打ちして name を読んでいたため）。
+static Node *aug_assign(Parser *p, Token *t, OpKind op, Node *target, Node *rhs) {
+    // 変数はそのまま。2 回評価しても副作用がないので、隠し変数は要りません。
+    if (target->kind == ND_VAR) {
+        Node *n = new_node(ND_ASSIGN, t);
+        n->lhs = target;
+        n->rhs = new_binop_node(t, op, new_var_node(target->tok, target->name), rhs);
+        return n;
+    }
+
+    Node head = {0};
+    Node *cur = &head;
+
+    char *obj = hidden_name(p, "aug.obj");
+    cur->next = hidden_decl(target->tok, obj, target->lhs);
+    cur = cur->next;
+
+    char *idx = NULL;
+    if (target->kind == ND_INDEX) {
+        idx = hidden_name(p, "aug.idx");
+        cur->next = hidden_decl(target->tok, idx, target->rhs);
+        cur = cur->next;
+    }
+
+    Node *asg = new_node(ND_ASSIGN, t);
+    asg->lhs = retarget(target, obj, idx);  // 書き
+    asg->rhs = new_binop_node(t, op, retarget(target, obj, idx), rhs);  // 読み
+    cur->next = asg;
+
+    // 隠し変数をこの文の中に閉じ込めるため、ブロックで包む（第11章の for と同じ）
+    Node *blk = new_node(ND_BLOCK, t);
+    blk->body = head.next;
+    return blk;
+}
+
 // simple_stmt ::= var_decl | assign_stmt | expr_stmt
 //
 // ★ 代入文と式文の区別のしかた（docs/spec/grammar.md 第4節）
@@ -609,12 +687,13 @@ static Node *simple_stmt(Parser *p) {
 
     // ここから代入。左辺が代入先になれるか確認する。
     // ★ 第5章の設計どおり、条件を 1 つ足すだけで xs[0] = v に対応できました。
-    if (lhs->kind != ND_VAR && lhs->kind != ND_INDEX) {
+    //   第12章の t.kind = v も、また 1 つ足すだけです。
+    if (lhs->kind != ND_VAR && lhs->kind != ND_INDEX && lhs->kind != ND_FIELD) {
         Diag d = {0};
         d.message = "この式には代入できません";
         d.primary.tok = lhs->tok;
-        d.primary.label = "代入先にできるのは変数と添字 xs[i] だけです";
-        d.hint = "フィールド p.f への代入は第12章で対応します";
+        d.primary.label = "代入先にできるのは変数・添字 xs[i]・フィールド t.f だけです";
+        d.hint = "計算結果を代入したい場合は、左辺に変数を書いてください";
         diag_fail(&d);
     }
     advance(p);  // "=" または複合代入記号
@@ -624,10 +703,10 @@ static Node *simple_stmt(Parser *p) {
     // ★ 複合代入は脱糖する（言語仕様 5.2）
     //     x += e  →  x = x + e
     //
-    // ⚠️ 左辺を 2 回書くことになります。変数なら 2 回評価しても同じですが、
-    //    第10章で xs[f()] += 1 のような形を許すときは
-    //    「左辺は 1 回だけ評価」を守る書き換えが必要になります。
-    if (aug >= 0) rhs = new_binop_node(t, (OpKind)aug, new_var_node(lhs->tok, lhs->name), rhs);
+    // ⚠️ 左辺が「読み」と「書き」の 2 回現れます。変数なら 2 回評価しても
+    //    同じですが、xs[f()] += 1 や t.g().f += 1 では f() が 2 回呼ばれます。
+    //    第5章に「第10章で必要になる」と書いた書き換えを、ここで実装します。
+    if (aug >= 0) return aug_assign(p, t, (OpKind)aug, lhs, rhs);
 
     Node *n = new_node(ND_ASSIGN, t);
     n->lhs = lhs;
@@ -715,7 +794,7 @@ static Node *if_stmt(Parser *p) {
 static char *hidden_name(Parser *p, const char *tag) {
     StrBuf sb;
     sb_init(&sb);
-    sb_printf(&sb, "for.%s.%d", tag, p->hidden++);
+    sb_printf(&sb, "%s.%d", tag, p->hidden++);
     return sb_str(&sb);
 }
 
@@ -813,7 +892,7 @@ static Node *for_stmt(Parser *p) {
     Node head = {0};
     Node *cur = &head;
 
-    char *ix = hidden_name(p, "ix");
+    char *ix = hidden_name(p, "for.ix");
     Node *cond = NULL;
     Node *bind = NULL;
 
@@ -829,7 +908,7 @@ static Node *for_stmt(Parser *p) {
         bind = hidden_decl(t, var_tok->text, new_var_node(t, ix));
     } else {
         // for.it.N = <対象>（★ 1 回だけ評価する）
-        char *it = hidden_name(p, "it");
+        char *it = hidden_name(p, "for.it");
         cur->next = hidden_decl(t, it, iter);
         cur = cur->next;
 
@@ -942,12 +1021,24 @@ static Node *type_ref(Parser *p, const char *what) {
 }
 
 // param ::= IDENT ":" type
-static Node *param(Parser *p) {
+//
+// ★ 第12章：メソッドの第 1 引数 self だけは型注釈を書きません
+//   （そのクラスに決まっているので、書かせても意味がない）。
+//   型は sema が入れます。第11章の「型注釈のない ND_VARDECL」と同じ抜け道で、
+//   利用者が書くふつうの引数は今までどおり型注釈が必須です。
+static Node *param(Parser *p, bool allow_self) {
     Token *name_tok = peek(p);
     if (name_tok->kind != TK_IDENT)
         error_at_hint(name_tok, "引数は「名前: 型」の形で書きます（例: n: int）",
                       "引数名が必要です");
     advance(p);
+
+    if (allow_self && strcmp(name_tok->text, "self") == 0 &&
+        !tok_is(peek(p), ":")) {
+        Node *n = new_node(ND_PARAM, name_tok);
+        n->name = name_tok->text;
+        return n;  // type_ref は NULL のまま（sema がクラスの型を入れる）
+    }
 
     if (!consume(p, ":"))
         error_at_hint(peek(p), "引数には型注釈が必須です（例: n: int）",
@@ -962,7 +1053,9 @@ static Node *param(Parser *p) {
 }
 
 // func_def ::= "def" IDENT "(" [ param_list ] ")" "->" type ":" block
-static Node *func_def(Parser *p) {
+//
+// in_class … クラス本体の中か（第12章。true なら第 1 引数に self を書ける）
+static Node *func_def(Parser *p, bool in_class) {
     Token *kw = advance(p);  // "def"
 
     Token *name_tok = peek(p);
@@ -983,13 +1076,27 @@ static Node *func_def(Parser *p) {
     Node *cur = &head;
     if (!tok_is(peek(p), ")")) {
         for (;;) {
-            cur->next = param(p);
+            // self を書けるのは「クラス本体の中の、第 1 引数」だけ
+            cur->next = param(p, in_class && cur == &head);
             cur = cur->next;
             if (!consume(p, ",")) break;
         }
     }
     expect_close(p, ")", open);
     n->params = head.next;
+
+    // メソッドの第 1 引数は self でなければならない（言語仕様 5.10）。
+    // ⚠️ ここで弾いておけば、sema は「メソッドの第 1 引数は self」と仮定できます。
+    if (in_class && (!n->params || strcmp(n->params->name, "self") != 0)) {
+        Diag d = {0};
+        d.message = diag_fmt("メソッド '%s' の第 1 引数は self でなければなりません",
+                             n->name);
+        d.primary.tok = n->params ? n->params->tok : name_tok;
+        d.primary.label = "ここに self が必要です";
+        d.hint = "Mython は self を明示的に書きます"
+                 "（例: def show(self) -> None:）";
+        diag_fail(&d);
+    }
 
     // 戻り型は必須（言語仕様 3.3）。
     // 🤔 省略を許すと再帰関数で「戻り型を知るには本体が要り、
@@ -1006,7 +1113,106 @@ static Node *func_def(Parser *p) {
     return n;
 }
 
-// program ::= { func_def | global_var | NEWLINE } EOF
+// field_decl ::= IDENT ":" type NEWLINE
+//
+// ★ 変数宣言（var_decl）とよく似ていますが、初期化式を取りません。
+//   フィールドの初期値は init メソッドで決めます（12.6 節）。
+static Node *field_decl(Parser *p) {
+    Token *name_tok = advance(p);  // IDENT（呼び出し元が確認済み）
+    advance(p);                    // ":"
+
+    Node *n = new_node(ND_FIELDDECL, name_tok);
+    n->name = name_tok->text;
+    n->type_ref = type_ref(p, "フィールドには型注釈が必須です（例: kind: int）");
+
+    if (tok_is(peek(p), "=")) {
+        Diag d = {0};
+        d.message = "フィールドに初期値は書けません";
+        d.primary.tok = peek(p);
+        d.primary.label = "ここに '=' は書けません";
+        d.hint = "初期値は init メソッドで代入してください"
+                 "（例: def init(self) -> None: / self.kind = 0）";
+        diag_fail(&d);
+    }
+    expect_newline(p);
+    return n;
+}
+
+// class_def ::= "class" IDENT ":" NEWLINE INDENT { field_decl } { func_def } DEDENT
+//
+// ★ block() を使わないのは、クラス本体が「文の列」ではなく「宣言の列」だからです
+//   （トップレベルと同じ性質）。だから字下げの処理も自前で書きます。
+static Node *class_def(Parser *p) {
+    Token *kw = advance(p);  // "class"
+
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok, "class の後にはクラス名を書きます（例: class Token:）",
+                      "クラス名が必要です");
+    advance(p);
+
+    Node *n = new_node(ND_CLASS, kw);
+    n->name = name_tok->text;
+
+    expect_colon(p, "class の宣言");
+    expect(p, TK_NEWLINE, "改行", "':' の後は改行してクラス本体を字下げしてください");
+    expect(p, TK_INDENT, "字下げされたクラス本体",
+           "クラスの中身は字下げして書きます（スペース 4 個を推奨）");
+
+    // ★ フィールドとメソッドを 1 本のリストにまとめます。
+    //   program() がトップレベルで def とグローバル変数を混ぜているのと同じ形です。
+    Node head = {0};
+    Node *cur = &head;
+    Node *first_method = NULL;
+
+    while (peek(p)->kind != TK_DEDENT && peek(p)->kind != TK_EOF) {
+        Token *t = peek(p);
+
+        if (tok_is_kw(t, "def")) {
+            cur->next = func_def(p, true);  // ★ true = self を書ける
+            cur = cur->next;
+            if (!first_method) first_method = cur;
+            continue;
+        }
+
+        if (t->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) {
+            // ⚠️ フィールドはメソッドより先（文法がそう決めている）。
+            //    レイアウトを確定してからメソッドを型検査したいためです。
+            if (first_method) {
+                Diag d = {0};
+                d.message = "フィールドはメソッドより前に書いてください";
+                d.primary.tok = t;
+                d.primary.label = "このフィールド宣言がメソッドより後ろにあります";
+                d.related.tok = first_method->tok;
+                d.related.label = "最初のメソッドはここです";
+                d.hint = "クラス本体は「フィールドを全部 → メソッドを全部」の順です"
+                         "（文法定義 3 節）";
+                diag_fail(&d);
+            }
+            cur->next = field_decl(p);
+            cur = cur->next;
+            continue;
+        }
+
+        Diag d = {0};
+        d.message = "クラスの中に書けるのはフィールドとメソッドだけです";
+        d.primary.tok = t;
+        d.primary.label = "ここには書けません";
+        d.hint = "フィールドは「名前: 型」、メソッドは 'def' で始めます:\n"
+                 "             class Token:\n"
+                 "                 kind: int\n"
+                 "\n"
+                 "                 def show(self) -> None:\n"
+                 "                     print(self.kind)";
+        diag_fail(&d);
+    }
+    expect(p, TK_DEDENT, "クラス本体の終わり", NULL);
+
+    n->body = head.next;
+    return n;
+}
+
+// program ::= { class_def | func_def | global_var | NEWLINE } EOF
 //
 // ★ 第8章でトップレベルが「宣言だけ」になりました（言語仕様 6.3）。
 //   実行文は書けません。プログラムの入口は def main() -> int: です。
@@ -1026,7 +1232,7 @@ static Node *program(Parser *p) {
             d.message = "予期しないインデントです";
             d.primary.tok = t;
             d.primary.label = "この行が余分に字下げされています";
-            d.hint = "トップレベルに書けるのは def とグローバル変数だけです"
+            d.hint = "トップレベルに書けるのは def / class とグローバル変数だけです"
                      "（言語仕様 6.3）";
             diag_fail(&d);
         }
@@ -1036,7 +1242,13 @@ static Node *program(Parser *p) {
         }
 
         if (tok_is_kw(t, "def")) {
-            cur->next = func_def(p);
+            cur->next = func_def(p, false);
+            cur = cur->next;
+            continue;
+        }
+
+        if (tok_is_kw(t, "class")) {  // 第12章
+            cur->next = class_def(p);
             cur = cur->next;
             continue;
         }
@@ -1053,7 +1265,7 @@ static Node *program(Parser *p) {
         Diag d = {0};
         d.message = "トップレベルに実行文は書けません";
         d.primary.tok = t;
-        d.primary.label = "ここに書けるのは def とグローバル変数だけです";
+        d.primary.label = "ここに書けるのは def / class とグローバル変数だけです";
         d.hint = "処理は main の中に書いてください:\n"
                  "             def main() -> int:\n"
                  "                 ...\n"

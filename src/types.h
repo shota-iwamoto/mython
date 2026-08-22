@@ -1,7 +1,7 @@
 // types.h — 型の表現
 //
-// 第10章の範囲：int / bool / None / str / list[T]。
-// str / float は第9章、list / class は第10章・第12章で足します。
+// 第12章の範囲：int / bool / None / str / list[T] / ユーザー定義クラス。
+// float は将来、T | None（nullable）は第15章で足します。
 //
 // 型付け規則の全体像は docs/spec/type-system.md にあります。
 #ifndef MYTHON_TYPES_H
@@ -15,11 +15,15 @@ typedef enum {
     TY_NONE,  // None → void（値を返さない。メモリ上の表現は無い）
     TY_STR,   // str  → ptr（参照型。第9章）
     TY_LIST,  // list[T] → ptr（複合型。第10章）
+    TY_CLASS, // ユーザー定義クラス → ptr（参照型。第12章）
     // ── 以降の章で追加していく ──
-    // TY_FLOAT, TY_STR, TY_NONE,   // 第9章
-    // TY_LIST,   // 第10章
-    // TY_CLASS,  // 第12章
+    // TY_FLOAT,  // float
+    // nullable（T | None）は Type にフラグを足す形で第15章
 } TypeKind;
+
+// クラス定義の実体は ast.h にあります（フィールドの並びとメソッドを持つため）。
+// ★ 型そのものは「どのクラスか」を指せれば十分なので、ここでは前方宣言だけ。
+struct Class;
 
 typedef struct Type Type;
 struct Type {
@@ -29,10 +33,9 @@ struct Type {
     // ★ ここが埋まる型はシングルトンにできません（T ごとに違うため）。
     Type *elem;
 
-    // ── 以降の章で使うフィールド ──
-    // Type *elem;    // list[T] の要素型（第10章）
-    // char *name;    // class 名（第12章）
-    // bool nullable; // T | None（第12章）
+    // ── class 用（第12章）──
+    char *name;         // クラス名（エラーメッセージ用）
+    struct Class *cls;  // 定義への参照。★ 型の同一性はこのポインタで判定する
 };
 
 // ★ プリミティブ型はシングルトン（起動時に 1 個だけ作る）。
@@ -69,6 +72,16 @@ Type *type_from_kind(int kind);
 // ⚠️ シングルトンではありません。書かれた場所ごとに新しく作られるので、
 //    型の比較は必ず type_equal() を通すこと。
 Type *type_list(Type *elem);
+
+// クラスの型を作る（第12章）。
+// ★ list[T] と違い、クラス定義ごとに 1 個だけ作ります
+//   （`Token` と書かれた型注釈は、すべて同じ Type * を指す）。
+Type *type_class(char *name, struct Class *cls);
+
+// 値のバイト数とアラインメント（第12章。クラスのレイアウト計算に使う）。
+// docs/design/memory-model.md 5 節の表がそのまま実装になっています。
+int type_size(Type *t);
+int type_align(Type *t);
 
 // 型注釈に書ける名前の一覧（エラーメッセージのヒスト用）。
 // 例: "int, bool"

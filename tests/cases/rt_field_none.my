@@ -1,0 +1,9 @@
+# EXIT: 1
+# 未初期化のクラス型フィールド（NULL）を参照すると my_check_not_none で止まる
+class Node:
+    v: int
+    next: Node
+
+def main() -> int:
+    a: Node = Node()
+    return a.next.v

@@ -1,0 +1,13 @@
+# OUTPUT: 5
+# t.next.v のような連鎖。postfix() のループなので自動で通る
+class Node:
+    v: int
+    next: Node
+
+def main() -> int:
+    a: Node = Node()
+    b: Node = Node()
+    b.v = 5
+    a.next = b
+    print(a.next.v)
+    return 0

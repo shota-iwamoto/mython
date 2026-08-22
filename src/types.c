@@ -28,6 +28,31 @@ Type *type_list(Type *elem) {
     return t;
 }
 
+Type *type_class(char *name, struct Class *cls) {
+    Type *t = new_type(TY_CLASS);
+    t->name = name;
+    t->cls = cls;
+    return t;
+}
+
+// ── サイズとアラインメント（第12章）──────────────────────────
+//
+// docs/design/memory-model.md 5 節の表のとおり。
+// ★ 参照型（str / list / class）は「ポインタ 1 個」なので 8 バイトです。
+//   指す先の大きさは関係ありません。
+int type_size(Type *t) {
+    switch (t->kind) {
+        case TY_BOOL: return 1;  // メモリ上は i8（規約 R5）
+        case TY_INT:
+        case TY_STR:
+        case TY_LIST:
+        case TY_CLASS: return 8;
+        default: UNREACHABLE();  // None は値を持たない
+    }
+}
+
+int type_align(Type *t) { return type_size(t); }
+
 bool type_equal(Type *a, Type *b) {
     // シングルトンなので、プリミティブ型どうしはここで済む
     if (a == b) return true;
@@ -39,7 +64,12 @@ bool type_equal(Type *a, Type *b) {
     //   （第5章のコメントで予告していた穴）。
     if (a->kind == TY_LIST) return type_equal(a->elem, b->elem);
 
-    // 第12章：class なら定義の同一性で比較する
+    // ★ 第12章：クラスは「同じ定義か」で比べます。名前の一致ではありません。
+    //   今は 1 ファイルなので同名クラスは 1 つだけですが、第13章で import が
+    //   入ると lexer.Token と parser.Token が同時に存在しえます。
+    //   定義ポインタで比べておけば、そのとき何も直さずに済みます。
+    if (a->kind == TY_CLASS) return a->cls == b->cls;
+
     return true;
 }
 
@@ -57,6 +87,7 @@ const char *type_name(Type *t) {
             sb_printf(&sb, "list[%s]", type_name(t->elem));
             return sb_str(&sb);
         }
+        case TY_CLASS: return t->name;  // 第12章
         default: UNREACHABLE();
     }
 }

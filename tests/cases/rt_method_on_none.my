@@ -1,0 +1,13 @@
+# EXIT: 1
+# NULL のフィールドを介したメソッド呼び出し。self の検査（メソッド側）で捕まる
+class N:
+    v: int
+    next: N
+
+    def show(self) -> None:
+        print(self.v)
+
+def main() -> int:
+    a: N = N()
+    a.next.show()
+    return 0

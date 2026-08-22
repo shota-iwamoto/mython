@@ -1,5 +1,5 @@
 # ERROR: 型 'list[int]' にメソッド 'push' はありません
-# ERROR: = ヒント: 今のところ使えるのは list[T] の append だけです
+# ERROR: = ヒント: 組み込みの型で使えるのは list[T] の append だけです
 def main() -> int:
     xs: list[int] = []
     xs.push(1)

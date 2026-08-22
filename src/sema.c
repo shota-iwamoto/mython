@@ -61,8 +61,9 @@ typedef struct {
     Scope *scope;      // 現在のスコープ
     int loop_depth;    // 今いるループの深さ（break / continue の検査用）
     UsedName *used;    // 割り当て済みの IR 名（関数ごとにリセット）
-    FuncSig *funcs;    // 関数表（第8章）
+    FuncSig *funcs;    // 関数表（第8章。メソッドも "Token.show" として入る）
     FuncSig *cur_func; // 今どの関数を検査中か（return の検査に必要）
+    Class *classes;    // クラス表（第12章）
 
     // 今この式に期待されている型（第10章）。
     //
@@ -75,6 +76,31 @@ typedef struct {
 
 static FuncSig *lookup_func(Sema *s, const char *name) {
     for (FuncSig *f = s->funcs; f; f = f->next)
+        if (strcmp(f->name, name) == 0) return f;
+    return NULL;
+}
+
+// ── クラス表と名前修飾（第12章）────────────────────────────
+//
+// ★ メソッドは「名前を修飾しただけの、ただの関数」です。
+//   名前を "Token.show" にしてしまえば、第8章で作った関数表にそのまま載ります。
+//   '.' を含む名前は利用者が書ける識別子と絶対に衝突しません
+//   （第11章の隠し変数 for.ix.0 と同じ手口）。
+static Class *lookup_class(Sema *s, const char *name) {
+    for (Class *c = s->classes; c; c = c->next)
+        if (strcmp(c->name, name) == 0) return c;
+    return NULL;
+}
+
+static char *mangle(const char *cls, const char *method) {
+    StrBuf sb;
+    sb_init(&sb);
+    sb_printf(&sb, "%s.%s", cls, method);
+    return sb_str(&sb);
+}
+
+static Field *lookup_field(Class *c, const char *name) {
+    for (Field *f = c->fields; f; f = f->next)
         if (strcmp(f->name, name) == 0) return f;
     return NULL;
 }
@@ -179,17 +205,18 @@ static Type *check_call(Sema *s, Node *n);
 static Type *check_list_lit(Sema *s, Node *n);
 static Type *check_index_expr(Sema *s, Node *n);
 static Type *check_method(Sema *s, Node *n);
+static Type *check_field(Sema *s, Node *n);
 
 // 型注釈（構文）を Type（意味）に変換する。
 //
 // ★ 「名前から型への解決は sema の仕事」（第5章の判断 #47）が、
 //   複合型になっても同じ形で通用します。
-static Type *resolve_type(Node *tr) {
+static Type *resolve_type(Sema *s, Node *tr) {
     if (strcmp(tr->name, "list") == 0) {
         if (!tr->lhs)
             error_at_hint(tr->tok, "要素型を書いてください（例: list[int]）",
                           "list には要素型が必要です");
-        Type *elem = resolve_type(tr->lhs);  // ★ 再帰
+        Type *elem = resolve_type(s, tr->lhs);  // ★ 再帰
         if (elem->kind == TY_NONE)
             error_at_hint(tr->tok, "None 型の値は存在しないので要素にできません",
                           "list の要素型に None は使えません");
@@ -201,19 +228,29 @@ static Type *resolve_type(Node *tr) {
                       "型 '%s' は要素型を取りません", tr->name);
 
     Type *t = type_from_name(tr->name);
-    if (!t) {
-        Diag d = {0};
-        d.message = diag_fmt("未知の型名 '%s' です", tr->name);
-        d.primary.tok = tr->tok;
-        d.primary.label = "この型は存在しません";
-        d.hint = diag_fmt("現在使える型: %s", type_name_list());
-        diag_fail(&d);
-    }
-    return t;
+    if (t) return t;
+
+    // ★ 第12章：組み込みの型名で無ければ、クラス名として引きます。
+    //   「型の一覧がソースコードによって増える」のは、この章が初めてです。
+    Class *c = lookup_class(s, tr->name);
+    if (c) return c->type;
+
+    Diag d = {0};
+    d.message = diag_fmt("未知の型名 '%s' です", tr->name);
+    d.primary.tok = tr->tok;
+    d.primary.label = "この型は存在しません";
+    d.hint = diag_fmt("現在使える型: %s、および定義したクラス名", type_name_list());
+    diag_fail(&d);
 }
 
 // 二項演算子が、その型に適用できるか
 static bool op_supports(OpKind op, Type *t) {
+    // ★ 第12章：クラスと list は「参照」なので、比べられるのは
+    //   同一性（== / !=）だけです。大小関係には意味がありません
+    //   （言語仕様 4.3 / docs/spec/type-system.md 5.6）。
+    if (t->kind == TY_CLASS || t->kind == TY_LIST)
+        return op == OP_EQ || op == OP_NE;
+
     // 比較は int どうし・bool どうしのどちらでも使える。
     // （両辺の型が等しいことは呼び出し側で検査済み）
     // 言語仕様 4.3 / docs/spec/type-system.md 5.5
@@ -361,6 +398,7 @@ static Type *check_expr(Sema *s, Node *n) {
         case ND_LIST: t = check_list_lit(s, n); break;
         case ND_INDEX: t = check_index_expr(s, n); break;
         case ND_METHOD: t = check_method(s, n); break;
+        case ND_FIELD: t = check_field(s, n); break;
         case ND_UNARY: t = check_unary(s, n); break;
         default: UNREACHABLE();
     }
@@ -382,7 +420,7 @@ static void check_vardecl(Sema *s, Node *n) {
     //    言語仕様 5.5 も「ループ変数は型注釈不要（要素型から決まる）」としています。
     Type *declared = NULL;
     if (n->type_ref) {
-        declared = resolve_type(n->type_ref);
+        declared = resolve_type(s, n->type_ref);
         if (declared->kind == TY_NONE)
             error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
                           "変数の型に None は使えません");
@@ -482,6 +520,31 @@ static void check_assign(Sema *s, Node *n) {
             diag_fail(&d);
         }
         n->type = et;
+        return;
+    }
+
+    // フィールドへの代入 t.kind = v（第12章）。
+    // ★ 添字への代入とまったく同じ形です（型を引く関数が違うだけ）。
+    if (target->kind == ND_FIELD) {
+        Type *ft = check_field(s, target);
+        target->type = ft;
+
+        s->expected = ft;
+        Type *actual = check_expr(s, n->rhs);
+        s->expected = NULL;
+
+        if (!type_equal(actual, ft)) {
+            Diag d = {0};
+            d.message = "型が一致しません";
+            d.primary.tok = n->rhs->tok;
+            d.primary.label = diag_fmt("型 '%s' の式", type_name(actual));
+            d.related.tok = target->field->tok;
+            d.related.label = diag_fmt("フィールド '%s' は '%s' 型として宣言されています",
+                                       target->field->name, type_name(ft));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+        n->type = ft;
         return;
     }
 
@@ -680,9 +743,101 @@ static Type *check_index_expr(Sema *s, Node *n) {
     diag_fail(&d);
 }
 
-// メソッド呼び出しの検査（第10章。今のところ list.append だけ）
+// フィールドアクセスの検査（型システム 5.9。第12章）
+static Type *check_field(Sema *s, Node *n) {
+    Type *ot = check_expr(s, n->lhs);
+
+    if (ot->kind != TY_CLASS) {
+        Diag d = {0};
+        d.message = diag_fmt("型 '%s' にフィールドはありません", type_name(ot));
+        d.primary.tok = n->lhs->tok;
+        d.primary.label = diag_fmt("これは '%s' 型です", type_name(ot));
+        d.hint = "'.' でフィールドを読めるのは class のインスタンスだけです";
+        diag_fail(&d);
+    }
+
+    Field *f = lookup_field(ot->cls, n->name);
+    if (!f) {
+        Diag d = {0};
+        d.message = diag_fmt("クラス '%s' にフィールド '%s' はありません",
+                             ot->cls->name, n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "このフィールドは宣言されていません";
+        d.related.tok = ot->cls->tok;
+        d.related.label = "クラスの定義はここです";
+        d.hint = "クラス本体の先頭に「名前: 型」の形で宣言してください";
+        diag_fail(&d);
+    }
+
+    n->field = f;  // ★ codegen はこれ（の index）を getelementptr に渡す
+    return f->type;
+}
+
+// クラスのメソッド呼び出しの検査（型システム 5.10。第12章）。
+//
+// ★ 「関数呼び出しの検査に self を 1 個足すだけ」です。
+//   名前を修飾して関数表に載せておいたので、引ける表は第8章のまま。
+static Type *check_class_method(Sema *s, Node *n, Class *c) {
+    char *mname = mangle(c->name, n->name);
+    FuncSig *f = lookup_func(s, mname);
+    if (!f) {
+        Diag d = {0};
+        d.message = diag_fmt("クラス '%s' にメソッド '%s' はありません", c->name,
+                             n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "このメソッドは定義されていません";
+        d.related.tok = c->tok;
+        d.related.label = "クラスの定義はここです";
+        if (lookup_field(c, n->name))
+            d.hint = diag_fmt("'%s' はフィールドです。'()' を外してください", n->name);
+        diag_fail(&d);
+    }
+
+    // 引数の個数（self は数えない）
+    int nargs = 0;
+    for (Node *a = n->args; a; a = a->next) nargs++;
+    if (nargs != f->nparams - 1) {
+        Diag d = {0};
+        d.message = diag_fmt("メソッド '%s' は %d 個の引数を取りますが、%d 個渡されました",
+                             mname, f->nparams - 1, nargs);
+        d.primary.tok = n->tok;
+        d.primary.label = "呼び出しの引数の個数が違います";
+        d.related.tok = f->tok;
+        d.related.label = "このメソッドはここで定義されています";
+        d.hint = "self は自動的に渡されるので、書く必要はありません";
+        diag_fail(&d);
+    }
+
+    // ★ 第 1 引数は self なので、実引数は params[i + 1] と比べます
+    int i = 0;
+    for (Node *a = n->args; a; a = a->next, i++) {
+        s->expected = f->params[i + 1];
+        Type *at = check_expr(s, a);
+        s->expected = NULL;
+        if (!type_equal(at, f->params[i + 1])) {
+            Diag d = {0};
+            d.message = diag_fmt("メソッド '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
+                                 mname, i + 1, type_name(at),
+                                 type_name(f->params[i + 1]));
+            d.primary.tok = a->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+            d.related.tok = f->tok;
+            d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i + 1],
+                                       type_name(f->params[i + 1]));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+    }
+
+    n->ir_name = mname;  // ★ codegen が呼ぶ関数名（@Token.show）
+    return f->ret;
+}
+
+// メソッド呼び出しの検査（第10章の list.append と、第12章のクラスのメソッド）
 static Type *check_method(Sema *s, Node *n) {
     Type *ot = check_expr(s, n->lhs);
+
+    if (ot->kind == TY_CLASS) return check_class_method(s, n, ot->cls);
 
     if (ot->kind == TY_LIST && strcmp(n->name, "append") == 0) {
         int nargs = 0;
@@ -720,13 +875,82 @@ static Type *check_method(Sema *s, Node *n) {
                          n->name);
     d.primary.tok = n->tok;
     d.primary.label = "このメソッドは存在しません";
-    d.hint = "今のところ使えるのは list[T] の append だけです";
+    d.hint = "組み込みの型で使えるのは list[T] の append だけです"
+             "（class のメソッドは自分で定義できます）";
     diag_fail(&d);
+}
+
+// インスタンス生成 Token(1, "x") の検査（第12章）。
+//
+// ★ 構文上はただの関数呼び出し（ND_CALL）です。名前解決の段階で分岐します。
+//   「どう扱うか」の判断をここで終わらせ、codegen には n->cls という
+//   記録を残すだけ。第9章の n->builtin とまったく同じ形です。
+static Type *check_new(Sema *s, Node *n, Class *c) {
+    n->cls = c;  // ★ codegen はこれを見て「生成」だと分かる
+
+    int nargs = 0;
+    for (Node *a = n->args; a; a = a->next) nargs++;
+
+    // init が無いクラスは、引数なしでしか作れない
+    if (!c->has_init) {
+        if (nargs != 0) {
+            Diag d = {0};
+            d.message = diag_fmt("クラス '%s' には init が無いので引数を渡せません",
+                                 c->name);
+            d.primary.tok = n->tok;
+            d.primary.label = diag_fmt("%d 個の引数が渡されています", nargs);
+            d.related.tok = c->tok;
+            d.related.label = "クラスの定義はここです";
+            d.hint = "引数を受け取るには init メソッドを定義してください:\n"
+                     "             def init(self, ...) -> None:";
+            diag_fail(&d);
+        }
+        return c->type;
+    }
+
+    // init があるなら、その引数と突き合わせる（self は飛ばす）
+    FuncSig *f = lookup_func(s, mangle(c->name, "init"));
+    if (nargs != f->nparams - 1) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' の生成には %d 個の引数が必要ですが、%d 個渡されました",
+                             c->name, f->nparams - 1, nargs);
+        d.primary.tok = n->tok;
+        d.primary.label = "引数の個数が違います";
+        d.related.tok = f->tok;
+        d.related.label = "init はここで定義されています";
+        d.hint = "self は自動的に渡されるので、書く必要はありません";
+        diag_fail(&d);
+    }
+
+    int i = 0;
+    for (Node *a = n->args; a; a = a->next, i++) {
+        s->expected = f->params[i + 1];
+        Type *at = check_expr(s, a);
+        s->expected = NULL;
+        if (!type_equal(at, f->params[i + 1])) {
+            Diag d = {0};
+            d.message = diag_fmt("'%s' の生成の第 %d 引数: 型 '%s' を '%s' に渡せません",
+                                 c->name, i + 1, type_name(at),
+                                 type_name(f->params[i + 1]));
+            d.primary.tok = a->tok;
+            d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
+            d.related.tok = f->tok;
+            d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i + 1],
+                                       type_name(f->params[i + 1]));
+            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            diag_fail(&d);
+        }
+    }
+    return c->type;
 }
 
 // 関数呼び出しの検査（docs/spec/type-system.md 5.7 の順序に従う）
 static Type *check_call(Sema *s, Node *n) {
     if (is_builtin_name(n->name)) return check_builtin_call(s, n);
+
+    // ★ 第12章：名前がクラスなら、これは呼び出しではなくインスタンス生成
+    Class *cls = lookup_class(s, n->name);
+    if (cls) return check_new(s, n, cls);
 
     // ① 定義されているか
     FuncSig *f = lookup_func(s, n->name);
@@ -896,7 +1120,194 @@ static bool always_returns(Node *n) {
 
 // ── パス 1：宣言の登録 ─────────────────────────────────────
 
+// ★ 第12章：登録が 3 段に分かれます。
+//
+//     1a  クラス名と Type だけ登録する      ← クラスどうしの相互参照のため
+//     1b  フィールドとメソッドを解決する      ← 型注釈に他のクラスを書ける
+//     1c  トップレベルの関数・グローバル変数   ← 引数の型にクラスを書ける
+//
+//   関数の前方参照（第8章）と同じ問題を、同じ手（先に名前だけ登録）で解いています。
+
+// 1a：クラス名と Type を作る。中身はまだ見ない。
+static void declare_class(Sema *s, Node *n) {
+    if (type_from_name(n->name))
+        error_at_hint(n->tok, diag_fmt("'%s' は組み込みの型名です", n->name),
+                      "クラス名 '%s' は使えません", n->name);
+    if (is_builtin_name(n->name))
+        error_at_hint(n->tok, diag_fmt("'%s' は組み込み関数の名前です", n->name),
+                      "クラス名 '%s' は使えません", n->name);
+
+    Class *prev = lookup_class(s, n->name);
+    if (prev) {
+        Diag d = {0};
+        d.message = diag_fmt("クラス '%s' は既に定義されています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "ここで再定義されています";
+        d.related.tok = prev->tok;
+        d.related.label = "最初の定義はここです";
+        diag_fail(&d);
+    }
+
+    Class *c = xmalloc(sizeof(Class));
+    c->name = n->name;
+    c->tok = n->tok;
+    c->node = n;
+    c->type = type_class(n->name, c);  // ★ クラスにつき Type は 1 個だけ
+    c->next = s->classes;
+    s->classes = c;
+
+    n->cls = c;
+    n->type = c->type;
+}
+
+// フィールドを並べて、オフセットとサイズを決める。
+//
+// ★ docs/design/memory-model.md 5 節の表がそのまま実装になっています。
+//   ⚠️ 読み書きに offset は使いません（getelementptr に渡すのは index）。
+//      offset は「自分の計算が合っているか」を確かめるための値です。
+static int align_up(int offset, int align) {
+    return (offset + align - 1) / align * align;
+}
+
+static void layout_class(Class *c) {
+    int offset = 0, max_align = 1, index = 0;
+    for (Field *f = c->fields; f; f = f->next) {
+        int a = type_align(f->type);
+        offset = align_up(offset, a);  // ★ パディングはここで入る
+        f->offset = offset;
+        f->index = index++;
+        offset += type_size(f->type);
+        if (a > max_align) max_align = a;
+    }
+    c->nfields = index;
+    c->align = max_align;
+    c->size = align_up(offset, max_align);  // 全体もアラインメントに切り上げる
+}
+
+// メソッドを FuncSig として登録する。名前は "Token.show"（名前修飾）。
+static void declare_method(Sema *s, Class *c, Node *fn) {
+    char *mname = mangle(c->name, fn->name);
+
+    FuncSig *prev = lookup_func(s, mname);
+    if (prev) {
+        Diag d = {0};
+        d.message = diag_fmt("メソッド '%s' は既に定義されています", mname);
+        d.primary.tok = fn->tok;
+        d.primary.label = "ここで再定義されています";
+        d.related.tok = prev->tok;
+        d.related.label = "最初の定義はここです";
+        diag_fail(&d);
+    }
+
+    Field *clash = lookup_field(c, fn->name);
+    if (clash) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' はフィールドと同じ名前です", fn->name);
+        d.primary.tok = fn->tok;
+        d.primary.label = "メソッド名がフィールド名と衝突しています";
+        d.related.tok = clash->tok;
+        d.related.label = "同名のフィールドはここです";
+        d.hint = "t.f が「フィールド」か「メソッド」か決められなくなるため禁止です";
+        diag_fail(&d);
+    }
+
+    Type *ret = resolve_type(s, fn->type_ref);
+
+    int nparams = 0;
+    for (Node *pm = fn->params; pm; pm = pm->next) nparams++;
+
+    FuncSig *f = xmalloc(sizeof(FuncSig));
+    f->name = mname;
+    f->ret = ret;
+    f->nparams = nparams;
+    f->params = xmalloc(sizeof(Type *) * (size_t)nparams);
+    f->pnames = xmalloc(sizeof(char *) * (size_t)nparams);
+    f->tok = fn->tok;
+
+    int i = 0;
+    for (Node *pm = fn->params; pm; pm = pm->next, i++) {
+        // ★ 第 1 引数 self には型注釈がありません（parser が保証している）。
+        //   そのクラスの型をここで入れます。これが「self の暗黙の型」です。
+        Type *pt = pm->type_ref ? resolve_type(s, pm->type_ref) : c->type;
+        if (pt->kind == TY_NONE)
+            error_at_hint(pm->tok, "None 型の値は存在しないので引数にできません",
+                          "引数の型に None は使えません");
+        f->params[i] = pt;
+        f->pnames[i] = pm->name;
+        pm->type = pt;
+    }
+
+    // コンストラクタ init は値を返せない（生成した自分自身が返るため）
+    if (strcmp(fn->name, "init") == 0) {
+        if (ret->kind != TY_NONE)
+            error_at_hint(fn->tok,
+                          "init は戻り値を持てません（-> None と書いてください）",
+                          "init の戻り型は None でなければなりません");
+        c->has_init = true;
+    }
+
+    f->next = s->funcs;
+    s->funcs = f;
+
+    fn->ir_name = mname;  // ★ codegen が define する関数名（@Token.show）
+    fn->type = ret;
+}
+
+// 1b：フィールドとメソッドを解決する。
+static void declare_class_members(Sema *s, Node *n) {
+    Class *c = n->cls;
+
+    // ① フィールド（宣言順にリストの末尾へ足す。並び順がレイアウトになる）
+    Field tail = {0};
+    Field *cur = &tail;
+    for (Node *m = n->body; m; m = m->next) {
+        if (m->kind != ND_FIELDDECL) continue;
+
+        Field *prev = lookup_field(c, m->name);
+        if (prev) {
+            Diag d = {0};
+            d.message = diag_fmt("フィールド '%s' は既に宣言されています", m->name);
+            d.primary.tok = m->tok;
+            d.primary.label = "ここで再宣言されています";
+            d.related.tok = prev->tok;
+            d.related.label = "最初の宣言はここです";
+            diag_fail(&d);
+        }
+
+        Type *ft = resolve_type(s, m->type_ref);
+        if (ft->kind == TY_NONE)
+            error_at_hint(m->tok, "None 型の値は存在しないのでフィールドにできません",
+                          "フィールドの型に None は使えません");
+
+        Field *f = xmalloc(sizeof(Field));
+        f->name = m->name;
+        f->type = ft;
+        f->tok = m->tok;
+        cur->next = f;
+        cur = f;
+        c->fields = tail.next;  // ★ lookup_field を回すために毎回つなぎ直す
+        m->type = ft;
+    }
+    c->fields = tail.next;
+    layout_class(c);
+
+    // ② メソッド
+    for (Node *m = n->body; m; m = m->next)
+        if (m->kind == ND_FUNC) declare_method(s, c, m);
+}
+
 static void declare_func(Sema *s, Node *n) {
+    if (lookup_class(s, n->name)) {
+        Diag d = {0};
+        d.message = diag_fmt("'%s' はクラス名として使われています", n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この名前の関数は定義できません";
+        d.related.tok = lookup_class(s, n->name)->tok;
+        d.related.label = "クラスの定義はここです";
+        d.hint = "クラス名は「インスタンス生成」の呼び出しに使われます"
+                 "（例: Token(1, \"x\")）";
+        diag_fail(&d);
+    }
     if (is_builtin_name(n->name))
         error_at_hint(n->tok, diag_fmt("%s は組み込み関数です。別の名前を使ってください",
                                        n->name),
@@ -913,7 +1324,7 @@ static void declare_func(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    Type *ret = resolve_type(n->type_ref);
+    Type *ret = resolve_type(s, n->type_ref);
 
     int nparams = 0;
     for (Node *pm = n->params; pm; pm = pm->next) nparams++;
@@ -928,7 +1339,7 @@ static void declare_func(Sema *s, Node *n) {
 
     int i = 0;
     for (Node *pm = n->params; pm; pm = pm->next, i++) {
-        Type *pt = resolve_type(pm->type_ref);
+        Type *pt = resolve_type(s, pm->type_ref);
         if (pt->kind == TY_NONE)
             error_at_hint(pm->tok, "None 型の値は存在しないので引数にできません",
                           "引数の型に None は使えません");
@@ -944,7 +1355,7 @@ static void declare_func(Sema *s, Node *n) {
 
 // グローバル変数の登録（言語仕様 6.2）
 static void declare_global(Sema *s, Node *n) {
-    Type *declared = resolve_type(n->type_ref);
+    Type *declared = resolve_type(s, n->type_ref);
     if (declared->kind == TY_NONE)
         error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
                       "変数の型に None は使えません");
@@ -1006,7 +1417,9 @@ static void declare_global(Sema *s, Node *n) {
 // ── パス 2：本体の検査 ─────────────────────────────────────
 
 static void check_func(Sema *s, Node *n) {
-    s->cur_func = lookup_func(s, n->name);
+    // ★ 第12章：メソッドは修飾名（Token.show）で表に載っています。
+    //   ir_name があればそれが表の鍵。無ければ今までどおり関数名。
+    s->cur_func = lookup_func(s, n->ir_name ? n->ir_name : n->name);
     s->used = NULL;  // IR 名は関数ごとに振り直す（別の関数なら衝突しない）
 
     scope_push(s);
@@ -1060,18 +1473,35 @@ void sema(Node *ast) {
     Sema s = {0};
     scope_push(&s);  // グローバルスコープ
 
-    // ── パス 1：シグネチャとグローバル変数を先に全部登録する ──
+    // ── パス 1：宣言を先に全部登録する ──
     // ★ 本体を見る前に登録するので、前方参照も再帰も自然に通ります。
     //   C がプロトタイプ宣言を要求するのは、この 2 パスを人間にやらせているからです。
+
+    // 1a：クラス名だけ先に登録する（クラスどうしが互いを参照できるように）
+    for (Node *d = ast->body; d; d = d->next)
+        if (d->kind == ND_CLASS) declare_class(&s, d);
+
+    // 1b：フィールドとメソッド（型注釈に他のクラスを書ける）
+    for (Node *d = ast->body; d; d = d->next)
+        if (d->kind == ND_CLASS) declare_class_members(&s, d);
+
+    // 1c：トップレベルの関数とグローバル変数（引数の型にクラスを書ける）
     for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_FUNC) declare_func(&s, d);
         else if (d->kind == ND_VARDECL) declare_global(&s, d);
+        else if (d->kind == ND_CLASS) continue;  // 1a / 1b で済んでいる
         else UNREACHABLE();  // parser が保証している
     }
 
     // ── パス 2：本体を検査する ──
-    for (Node *d = ast->body; d; d = d->next)
+    for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_FUNC) check_func(&s, d);
+        // メソッドの本体も、ふつうの関数とまったく同じ手順で検査します。
+        // self はもう「型が入った引数」なので、特別扱いは 1 つも要りません。
+        else if (d->kind == ND_CLASS)
+            for (Node *m = d->body; m; m = m->next)
+                if (m->kind == ND_FUNC) check_func(&s, m);
+    }
 
     check_main(&s, ast);
     scope_pop(&s);

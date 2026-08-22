@@ -33,6 +33,19 @@ void *my_alloc(long long size) {
     return p;
 }
 
+// ── None（null ポインタ）の検査（第12章）────────────────────
+//
+// ★ クラス型のフィールドは calloc により NULL から始まります
+//   （既定値を作ろうとすると無限再帰するため。docs/chapters/ch12-class.md 12.6）。
+//   init で入れ忘れたまま参照すると segfault しますが、
+//   ここを通しておけば「何が起きたか分かるメッセージ」に変わります。
+//
+// ⚠️ 本来の解決策は型システム側（T | None と narrowing）です。第15章で塞ぎます。
+void *my_check_not_none(void *p) {
+    if (!p) my_panic("field access on None (uninitialized reference field?)");
+    return p;
+}
+
 // ── 出力（print のオーバーロード）──────────────────────────
 
 void my_print_int(long long v) { printf("%lld\n", v); }

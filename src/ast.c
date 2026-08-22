@@ -160,6 +160,24 @@ static void dump(Node *n, int depth) {
             for (int i = 0; i < depth; i++) printf("  ");
             printf(")\n");
             break;
+        case ND_FIELD:
+            printf("(field %s\n", n->name);
+            dump(n->lhs, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_CLASS:
+            printf("(class %s\n", n->name);
+            for (Node *m = n->body; m; m = m->next) dump(m, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
+        case ND_FIELDDECL:
+            printf("(fielddecl %s\n", n->name);
+            dump(n->type_ref, depth + 1);
+            for (int i = 0; i < depth; i++) printf("  ");
+            printf(")\n");
+            break;
         case ND_VARDECL:
             printf("(vardecl %s\n", n->name);
             dump(n->type_ref, depth + 1);

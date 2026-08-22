@@ -92,6 +92,7 @@ static const char *llvm_type(Type *t) {
         case TY_NONE: return "void";  // 値がない（第8章）
         case TY_STR: return "ptr";    // 参照型（第9章）
         case TY_LIST: return "ptr";   // MyList へのポインタ（第10章）
+        case TY_CLASS: return "ptr";  // インスタンスへのポインタ（第12章）
         default: UNREACHABLE();
     }
 }
@@ -107,6 +108,7 @@ static const char *llvm_mem_type(Type *t) {
         case TY_BOOL: return "i8";  // メモリ上は 1 バイト
         case TY_STR: return "ptr";  // ポインタをそのまま置く（第9章）
         case TY_LIST: return "ptr"; // 第10章
+        case TY_CLASS: return "ptr";  // 第12章
         // ⚠️ TY_NONE はメモリ上の表現を持ちません。
         //    ここに来たら「None の変数を作ろうとしている」= コンパイラのバグ。
         default: UNREACHABLE();
@@ -302,6 +304,7 @@ static char *gen_call(Emitter *e, Node *n);
 static char *gen_list_lit(Emitter *e, Node *n);
 static char *gen_index(Emitter *e, Node *n);
 static char *gen_method(Emitter *e, Node *n);
+static char *gen_field(Emitter *e, Node *n);
 
 static char *gen_expr(Emitter *e, Node *n) {
     switch (n->kind) {
@@ -397,6 +400,9 @@ static char *gen_expr(Emitter *e, Node *n) {
         case ND_METHOD:
             return gen_method(e, n);
 
+        case ND_FIELD:
+            return gen_field(e, n);
+
         case ND_VAR:
             // 変数の読み出し（規約 R2）。bool なら i8 → i1 の変換も入る。
             // ★ n->name ではなく sema が割り当てた n->ir_name を使う（第7章）
@@ -483,7 +489,10 @@ static char *gen_logical(Emitter *e, Node *n) {
 //
 // ★ 要素はすべて 8 バイト。i64 で持つか、ポインタで持つかの 2 通りだけです。
 static bool elem_is_ptr(Type *elem) {
-    return elem->kind == TY_STR || elem->kind == TY_LIST;
+    // ★ 第12章：クラスも参照（ポインタ）なので、ここに 1 語足すだけで
+    //   list[Token] が動きます。第10章の設計がそのまま効いています。
+    return elem->kind == TY_STR || elem->kind == TY_LIST ||
+           elem->kind == TY_CLASS;
 }
 
 // 要素の値を「ランタイムに渡す形」にする（bool は i64 に広げる。規約 R5）
@@ -572,7 +581,30 @@ static void gen_index_store(Emitter *e, Node *target, char *val) {
 }
 
 static char *gen_method(Emitter *e, Node *n) {
-    // 今のところ list.append だけ（sema が保証している）
+    // クラスのメソッド（第12章）。self を第 1 引数に渡すだけ。
+    // ★ 呼ぶ関数名は sema が修飾済み（n->ir_name = "Token.show"）。
+    if (n->lhs->type->kind == TY_CLASS) {
+        char *obj = gen_expr(e, n->lhs);
+
+        StrBuf args;
+        sb_init(&args);
+        sb_printf(&args, "ptr %s", obj);
+        for (Node *a = n->args; a; a = a->next) {
+            char *v = gen_expr(e, a);
+            sb_printf(&args, ", %s %s", llvm_type(a->type), v);
+        }
+
+        if (n->type->kind == TY_NONE) {
+            sb_printf(&e->fn, "  call void @%s(%s)\n", n->ir_name, sb_str(&args));
+            return NULL;
+        }
+        char *t = new_tmp(e);
+        sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type),
+                  n->ir_name, sb_str(&args));
+        return t;
+    }
+
+    // list.append（第10章。sema が保証している）
     Type *elem = n->lhs->type->elem;
     char *obj = gen_expr(e, n->lhs);
 
@@ -586,6 +618,99 @@ static char *gen_method(Emitter *e, Node *n) {
     char *v = elem_to_slot(e, elem, gen_expr(e, n->args));
     sb_printf(&e->fn, "  call void @%s(ptr %s, %s %s)\n", push, obj, sty, v);
     return NULL;
+}
+
+// ── class の生成（第12章）──────────────────────────────────
+//
+// ★ 使う道具は getelementptr ひとつだけです。
+//   「オブジェクトの何番目のフィールドか」を渡すと、
+//   バイト数への変換（パディング込み）は LLVM がやってくれます。
+
+// フィールドのアドレスを求める。読み出しにも代入にも使います。
+static char *gen_field_ptr(Emitter *e, Node *n) {
+    Class *c = n->lhs->type->cls;
+    char *obj = gen_expr(e, n->lhs);
+
+    // ⚠️ クラス型のフィールドは NULL から始まります（12.6 節）。
+    //    NULL 参照を segfault ではなく親切なメッセージに変えるため、
+    //    ランタイムに 1 回問い合わせます（規約 R10：分岐は IR に出さない）。
+    declare_rt(e, "ptr @my_check_not_none(ptr)");
+    char *ok = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @my_check_not_none(ptr %s)\n", ok, obj);
+
+    // ⚠️ 第 1 インデックスは常に 0（「Token の配列の何個目か」）。
+    //    ここを 1 にすると隣のオブジェクトがある場所を読みます。
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = getelementptr %%%s.type, ptr %s, i32 0, i32 %d\n", t,
+              c->name, ok, n->field->index);
+    return t;
+}
+
+static char *gen_field(Emitter *e, Node *n) {
+    // ★ 読み書きは第6章の gen_load / gen_store をそのまま使います。
+    //   bool フィールドの i8 ↔ i1 変換（規約 R5）は、何も書かずに手に入ります。
+    return gen_load(e, n->type, gen_field_ptr(e, n));
+}
+
+// インスタンス生成 Token(1, "x")。
+//
+//   ① ヒープに確保する（my_alloc は calloc なので必ずゼロ初期化される）
+//   ② 参照型フィールドに既定値を入れる（12.6 節）
+//   ③ init があれば呼ぶ
+static char *gen_new(Emitter *e, Node *n) {
+    Class *c = n->cls;
+
+    declare_rt(e, "ptr @my_alloc(i64)");
+    char *obj = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call ptr @my_alloc(i64 %d)\n", obj, c->size);
+
+    // ★ ゼロ初期化では足りない型に、有効な値を入れておきます。
+    //   str → ""、list[T] → 空のリスト。
+    //   これで「init を書き忘れたら壊れる」がほぼ無くなります。
+    for (Field *f = c->fields; f; f = f->next) {
+        if (f->type->kind != TY_STR && f->type->kind != TY_LIST) continue;
+
+        char *val;
+        if (f->type->kind == TY_STR) {
+            val = intern_str(e, "", 0);
+        } else {
+            declare_rt(e, "ptr @my_list_new()");
+            val = new_tmp(e);
+            sb_printf(&e->fn, "  %s = call ptr @my_list_new()\n", val);
+        }
+        char *p = new_tmp(e);
+        sb_printf(&e->fn, "  %s = getelementptr %%%s.type, ptr %s, i32 0, i32 %d\n",
+                  p, c->name, obj, f->index);
+        sb_printf(&e->fn, "  store ptr %s, ptr %s\n", val, p);
+    }
+
+    if (!c->has_init) return obj;
+
+    // init は「self を第 1 引数に取るふつうの関数」（規約 R8 がそのまま働く）
+    StrBuf args;
+    sb_init(&args);
+    sb_printf(&args, "ptr %s", obj);
+    for (Node *a = n->args; a; a = a->next) {
+        char *v = gen_expr(e, a);
+        sb_printf(&args, ", %s %s", llvm_type(a->type), v);
+    }
+    sb_printf(&e->fn, "  call void @%s.init(%s)\n", c->name, sb_str(&args));
+    return obj;
+}
+
+// クラスの型定義を出す：%Token.type = type { i64, ptr }
+//
+// ★ フィールドの LLVM 型は「メモリ上の型」（bool は i8。規約 R5）。
+static void gen_class_type(Emitter *e, Class *c) {
+    sb_printf(&e->header, "%%%s.type = type { ", c->name);
+    bool first = true;
+    for (Field *f = c->fields; f; f = f->next) {
+        sb_printf(&e->header, "%s%s", first ? "" : ", ", llvm_mem_type(f->type));
+        first = false;
+    }
+    // ⚠️ フィールドが 0 個でも空の構造体は書けます（サイズ 0）。
+    //    my_alloc(0) は calloc(1, 0) になり、有効なポインタが返ります。
+    sb_printf(&e->header, " }\n");
 }
 
 // ── 制御構文の生成（規約 6.3 / 6.4 / 6.5）──────────────────
@@ -715,6 +840,7 @@ static char *gen_builtin_call(Emitter *e, Node *n) {
 //      call void @f()         ✅
 static char *gen_call(Emitter *e, Node *n) {
     if (n->builtin) return gen_builtin_call(e, n);
+    if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
 
     // 引数を左から順に評価する（言語仕様 4.5）
     StrBuf args;
@@ -787,6 +913,11 @@ static char *gen_stmt(Emitter *e, Node *n) {
                 gen_index_store(e, n->lhs, val);
                 return NULL;
             }
+            // フィールドへの代入 t.kind = v（第12章）
+            if (n->lhs->kind == ND_FIELD) {
+                gen_store(e, n->type, val, gen_field_ptr(e, n->lhs));
+                return NULL;
+            }
             gen_store(e, n->type, val, n->lhs->ir_name);
             return NULL;
         }
@@ -837,9 +968,11 @@ static void gen_func(Emitter *e, Node *n) {
     sb_init(&e->allocas);
     sb_init(&e->fn);
 
-    // main はラッパ方式（規約 7 節の方式 A）なので @mython_main として出す
-    const char *ir_name =
-        strcmp(n->name, "main") == 0 ? "mython_main" : n->name;
+    // main はラッパ方式（規約 7 節の方式 A）なので @mython_main として出す。
+    // ★ 第12章：メソッドは sema が修飾名（Token.show）を入れてくれています。
+    const char *ir_name = n->ir_name          ? n->ir_name
+                          : strcmp(n->name, "main") == 0 ? "mython_main"
+                                                         : n->name;
 
     // ① 引数を alloca にコピーする（規約 R8）。
     //
@@ -943,12 +1076,22 @@ char *codegen(Node *ast, const char *source_name) {
     if (MYTHON_TARGET_TRIPLE[0])
         sb_printf(&e.header, "target triple = \"%s\"\n", MYTHON_TARGET_TRIPLE);
 
+    // ② クラスの型定義（★ 使う側より先に、モジュールの先頭に出す）
+    for (Node *d = ast->body; d; d = d->next) {
+        if (d->kind == ND_CLASS) gen_class_type(&e, d->cls);
+    }
+
     // ⑤ グローバル変数と関数定義
     for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_VARDECL) gen_global(&e, d);
     }
     for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_FUNC) gen_func(&e, d);
+        // メソッドも、ふつうの関数とまったく同じ関数で出します。
+        // 違うのは名前（@Token.show）と、第 1 引数が self であることだけ。
+        if (d->kind == ND_CLASS)
+            for (Node *m = d->body; m; m = m->next)
+                if (m->kind == ND_FUNC) gen_func(&e, m);
     }
     gen_c_main(&e);
 
