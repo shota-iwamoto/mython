@@ -431,10 +431,24 @@ extern def strlen(s: str) -> int
 
 ```python
 import lexer
-from lexer import Token
+
+def main() -> int:
+    t: lexer.Token = lexer.make(1, "hi")
+    print(lexer.MAX_KIND)
+    return 0
 ```
 
-詳細は第13章で定義します。
+- **モジュール名 = ファイル名から `.my` を除いたもの**（`import lexer` → `lexer.my`）
+- 探索するのは**入口ファイルのあるディレクトリ**だけ（v1）
+- `import` は**トップレベルにのみ**書ける（6.3）
+- トップレベルの名前は**すべて公開**される（非公開の規約は設けない）
+- **他モジュールの名前は必ず修飾して使う**（`lexer.Token`。`Token` とは書けない）
+- 型注釈の修飾は **1 段だけ**（`lexer.Token` / `list[lexer.Token]`）
+- **モジュール名と同じ名前**の変数・関数・クラスは宣言できない
+- **循環 import はエラー**（依存関係は DAG に保つ）
+
+**採用しないもの**：`from X import Y`／`import X as Y`／`from X import *`／
+パッケージ（`a.b.c`）。理由は第13章 13.1 節。
 
 ---
 

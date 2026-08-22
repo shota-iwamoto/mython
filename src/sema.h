@@ -24,6 +24,7 @@
 #include <stdbool.h>
 
 #include "ast.h"
+#include "module.h"
 
 // 組み込み関数の候補（第9章）。
 // ★ sema と codegen が同じ表を見ます。
@@ -40,8 +41,10 @@ extern const Builtin BUILTINS[];
 bool is_builtin_name(const char *name);
 
 
-// AST を検査し、各ノードの type を埋める。
+// 全モジュールを検査し、各ノードの type / ir_name を埋める。
 // 問題があればエラーを表示して終了する（戻ってこない）。
-void sema(Node *ast);
+//
+// ★ 第13章：単位が「1 つの AST」から「依存順に並んだモジュール列」になりました。
+void sema_program(Module *mods, Module *entry);
 
 #endif  // MYTHON_SEMA_H

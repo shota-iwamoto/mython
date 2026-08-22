@@ -119,7 +119,9 @@ global_var ::= IDENT ":" type "=" expr NEWLINE
 
 (* ── import ── *)
 import_stmt::= "import" IDENT NEWLINE
-             | "from" IDENT "import" IDENT { "," IDENT } NEWLINE
+
+(* ⚠️ ch13: "from X import Y" は採用しません。名前の出どころが
+   ソースから読み取れなくなるためです（ch13 13.1 節）。 *)
 ```
 
 **⚠️ 注意**：`class_body` はフィールド宣言をすべてメソッドより先に置くことを要求します。
@@ -305,8 +307,8 @@ Node *power(Parser *p) {
 ## 6. 型の文法
 
 ```ebnf
-type       ::= IDENT [ "[" type { "," type } "]" ]
-             | type "|" "None"                    (* Nullable, ch12 *)
+type       ::= [ IDENT "." ] IDENT [ "[" type { "," type } "]" ]   (* 修飾は 1 段, ch13 *)
+             | type "|" "None"                    (* Nullable, ch15 *)
 ```
 
 例：
@@ -318,8 +320,13 @@ list[int]
 list[list[str]]
 dict[str, int]
 Token
-Token | None
+lexer.Token          (* 他モジュールの型, ch13 *)
+list[lexer.Token]
+Token | None         (* ch15 *)
 ```
+
+**⚠️ モジュール修飾は 1 段だけ**です（`a.b.Token` は書けません）。
+パッケージ（階層モジュール）を採用しないためです（ch13 13.1 節）。
 
 **⚠️ 曖昧性**：`type` の `|` と、式の `|`（ビット OR）は同じ記号です。
 型が現れる文脈（`:` の後、`->` の後、`[` `]` の中）でのみ型パーサを呼ぶことで区別します。
@@ -344,8 +351,9 @@ Token | None
 | ch9 | `STRING` `FLOAT`、`extern_def`、`power`（`**` は負の指数を実行時エラーにするためランタイムが必要） |
 | ch10 | `list_display` `index_suffix`、`type` のジェネリック部分 |
 | ch11 | `for_stmt` |
-| ch12 | `class_def` `field_decl` `attr_suffix`、Nullable 型 |
-| ch13 | `import_stmt` |
+| ch12 | `class_def` `field_decl` `attr_suffix` |
+| ch13 | `import_stmt`、`type` のモジュール修飾 |
+| ch15 | Nullable 型（`T \| None`。ch12 から移動） |
 
 **⚠️ 第1章の文法は仕様書の文法と一致しません。**
 これは意図的です。第1章では「パイプラインを通す」ことだけに集中するため、

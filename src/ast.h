@@ -55,8 +55,10 @@ typedef enum {
     ND_FIELDDECL,  // フィールド宣言 kind: int → name, type_ref
     ND_FIELD,      // フィールドアクセス t.kind → lhs（対象）, name, field
 
-    // ── 第13章以降で追加していく ──
-    // ND_IMPORT, ...
+    // ── 第13章：モジュール ──
+    ND_IMPORT,  // import lexer → name（モジュール名）, mod（解決したモジュール）
+
+    // ── 第14章以降で追加していく ──
 } NodeKind;
 
 // 演算子の種類。
@@ -125,9 +127,13 @@ struct Field {
     Field *next;
 };
 
+// 意味解析が持つモジュールごとのシンボル表（sema.c で定義。第13章）
+struct ModuleSyms;
+
 typedef struct Class Class;
 struct Class {
     char *name;
+    char *ir_name;   // IR 上の修飾名（第13章。"lexer.Token"）。型は %lexer.Token.type
     Token *tok;      // 定義位置
     Field *fields;   // 宣言順
     int nfields;
@@ -136,6 +142,11 @@ struct Class {
     Type *type;      // このクラスの Type（★ クラスにつき 1 個だけ作る）
     Node *node;      // ND_CLASS（メソッドをたどるため）
     bool has_init;   // init メソッドを持つか
+
+    // ★ 第13章：このクラスが定義されているモジュール。
+    //   メソッドは「定義されたモジュールの関数表」にいるので、
+    //   使う側のモジュールから引くにはここをたどります。
+    struct ModuleSyms *owner;
     Class *next;
 };
 
@@ -220,6 +231,16 @@ struct Node {
 
     // ND_FIELD が指すフィールド（sema が解決する）
     Field *field;
+
+    // ── 第13章：モジュール ──
+    //
+    // ★ 「'.' の左がモジュールだった」ことの記録（ND_FIELD / ND_METHOD）。
+    //   sema が名前解決で判断し、codegen は読むだけ（第9章の builtin と同じ形）。
+    //   ND_TYPEREF では型注釈に書かれた修飾（lexer.Token の "lexer"）を持ちます。
+    char *mod_name;
+
+    // 参照先が別のモジュールにあるか（codegen が declare / external を出す判断）
+    bool is_extern;
 
     // ND_FUNC の仮引数リスト / ND_CALL の実引数リスト（next で連結）。第8章
     Node *params;

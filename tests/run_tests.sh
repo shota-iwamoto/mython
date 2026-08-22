@@ -11,9 +11,19 @@
 #                     → --dump-tokens のトークン種別の並びが一致すること
 #                       （複数行書くと空白で連結して比較する）
 #
+# 複数ファイル（import）のテストは 1 ケース 1 ディレクトリです（第13章）:
+#
+#   tests/mods/<ケース名>/main.my   ← 入口。期待値のコメントもここに書く
+#   tests/mods/<ケース名>/lexer.my  ← import されるモジュール
+#
+# ★ 1 ディレクトリにまとめるのは、import の探索場所が
+#   「入口ファイルのあるディレクトリ」だからです。tests/cases に置くと、
+#   モジュール側のファイルまで単体のテストケースとして拾われてしまいます。
+#
 # 使い方:
-#   tests/run_tests.sh                    全ケース
-#   tests/run_tests.sh tests/cases/x.my   1 ケースだけ
+#   tests/run_tests.sh                     全ケース
+#   tests/run_tests.sh tests/cases/x.my    1 ケースだけ
+#   tests/run_tests.sh tests/mods/y/main.my
 
 set -u
 
@@ -35,6 +45,11 @@ else
     # ソートして順序を安定させる（テスト結果が実行ごとに変わらないように）
     CASES=()
     while IFS= read -r line; do CASES+=("$line"); done < <(ls "$ROOT"/tests/cases/*.my | sort)
+    # 複数モジュールのケース（tests/mods/<名前>/main.my）
+    if [ -d "$ROOT/tests/mods" ]; then
+        while IFS= read -r line; do CASES+=("$line"); done \
+            < <(ls "$ROOT"/tests/mods/*/main.my 2>/dev/null | sort)
+    fi
 fi
 
 pass=0
@@ -59,8 +74,12 @@ report_fail() {
 }
 
 for case_file in "${CASES[@]}"; do
-    name="$(basename "$case_file")"
-    base="${name%.my}"
+    # 複数モジュールのケースは「ディレクトリ名」で呼ぶ（main.my ばかりになるため）
+    case "$case_file" in
+        *tests/mods/*) name="$(basename "$(dirname "$case_file")")/main.my" ;;
+        *)              name="$(basename "$case_file")" ;;
+    esac
+    base="$(echo "${name%.my}" | tr '/' '_')"
     exe="$TMP/$base"
 
     # ── 期待値をヘッダコメントから読み取る ──

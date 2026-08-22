@@ -58,7 +58,7 @@
 | [第10章](chapters/ch10-list.md) | list[T]（動的配列） | ✅ 完成 |
 | [第11章](chapters/ch11-for-and-range.md) | for 文と range | ✅ 完成 |
 | [第12章](chapters/ch12-class.md) | class（構造体とメソッド） | ✅ 完成 |
-| 第13章 | モジュールと import | ⬜ 未着手 |
+| [第13章](chapters/ch13-modules.md) | モジュールと import | ✅ 完成 |
 | 第14章 | 標準ライブラリ | ⬜ 未着手 |
 | 第15章 | セルフホスト準備（機能棚卸し） | ⬜ 未着手 |
 | 第16章 | Mython で字句解析器を書く | ⬜ 未着手 |

@@ -1,5 +1,7 @@
 #include "sema.h"
 
+#include "module.h"
+
 #include <string.h>
 
 #include "diag.h"
@@ -46,15 +48,32 @@ struct UsedName {
 //
 // ★ 本体を見る前に、全部の関数をここに登録します（8.5 節）。
 //   前方参照と再帰が自然に通るようになります。
+typedef struct ModuleSyms ModuleSyms;
+
 typedef struct FuncSig FuncSig;
 struct FuncSig {
-    char *name;
+    char *name;      // 表を引く鍵（"add" / "Token.show"。★ モジュール内で一意）
+    char *ir_name;   // IR 上の名前（第13章。"lexer.add" / "lexer.Token.show"）
     Type *ret;
     Type **params;  // 引数の型
     char **pnames;  // 引数名（エラーメッセージ用）
     int nparams;
     Token *tok;     // 定義位置（「この関数はここで定義されています」用）
+    ModuleSyms *owner;  // どのモジュールのものか（第13章）
     FuncSig *next;
+};
+
+// ── モジュールごとのシンボル表（第13章）──────────────────
+//
+// ★ 第12章までは「表が 1 本ずつ」でした。モジュールが増えると
+//   「モジュールごとに 1 本ずつ」になります。名前空間とはこれのことです。
+//   他のモジュールの中身は、必ず修飾（lexer.Token）を通してしか見えません。
+struct ModuleSyms {
+    Module *mod;
+    FuncSig *funcs;    // トップレベル関数とメソッド
+    Class *classes;
+    Scope *globals;    // グローバル変数のスコープ
+    ModuleSyms *next;
 };
 
 typedef struct {
@@ -62,8 +81,13 @@ typedef struct {
     int loop_depth;    // 今いるループの深さ（break / continue の検査用）
     UsedName *used;    // 割り当て済みの IR 名（関数ごとにリセット）
     FuncSig *funcs;    // 関数表（第8章。メソッドも "Token.show" として入る）
+                       // ★ 第13章：これは「今検査中のモジュールの」表です
     FuncSig *cur_func; // 今どの関数を検査中か（return の検査に必要）
-    Class *classes;    // クラス表（第12章）
+    Class *classes;    // クラス表（第12章。同上、モジュールごと）
+
+    // ── 第13章：モジュール ──
+    ModuleSyms *cur;   // 今検査中のモジュール
+    ModuleSyms *mods;  // 全モジュール（依存順）
 
     // 今この式に期待されている型（第10章）。
     //
@@ -74,9 +98,70 @@ typedef struct {
     Type *expected;
 } Sema;
 
+// ── モジュールの出入り（第13章）────────────────────────────
+//
+// ★ 「今どのモジュールを検査中か」を切り替えるだけの関数です。
+//   表そのものは Sema に置いたまま（第12章までのコードが 1 行も変わらない）、
+//   切り替えるときに ModuleSyms へ書き戻します。
+static void enter_module(Sema *s, ModuleSyms *ms) {
+    if (s->cur) {  // 今のモジュールの状態を保存する
+        s->cur->funcs = s->funcs;
+        s->cur->classes = s->classes;
+        s->cur->globals = s->scope;
+    }
+    s->cur = ms;
+    s->funcs = ms->funcs;
+    s->classes = ms->classes;
+    s->scope = ms->globals;
+}
+
+// import しているモジュールを名前で引く。
+// ⚠️ import していないモジュールは、たとえ読み込まれていても見えません。
+static ModuleSyms *lookup_import(Sema *s, const char *name) {
+    Module *m = s->cur->mod;
+    for (int i = 0; i < m->ndeps; i++)
+        if (strcmp(m->deps[i]->name, name) == 0) return m->deps[i]->syms;
+    return NULL;
+}
+
+// IR 上の修飾名を作る（第12章の mangle をモジュールにも使う）
+static char *mangle(const char *prefix, const char *name);
+
+static char *mod_mangle(Sema *s, const char *name) {
+    return mangle(s->cur->mod->name, name);
+}
+
+static FuncSig *lookup_func_in(ModuleSyms *ms, const char *name) {
+    for (FuncSig *f = ms->funcs; f; f = f->next)
+        if (strcmp(f->name, name) == 0) return f;
+    return NULL;
+}
+
+static Class *lookup_class_in(ModuleSyms *ms, const char *name) {
+    for (Class *c = ms->classes; c; c = c->next)
+        if (strcmp(c->name, name) == 0) return c;
+    return NULL;
+}
+
+static VarEntry *lookup_global_in(ModuleSyms *ms, const char *name) {
+    for (VarEntry *v = ms->globals->vars; v; v = v->next)
+        if (strcmp(v->name, name) == 0) return v;
+    return NULL;
+}
+
 static FuncSig *lookup_func(Sema *s, const char *name) {
     for (FuncSig *f = s->funcs; f; f = f->next)
         if (strcmp(f->name, name) == 0) return f;
+    return NULL;
+}
+
+// IR 名（モジュール修飾済み）で引く。
+// ★ 第13章：表の鍵は「モジュール内で一意な名前」（add / Token.show）ですが、
+//   検査中の関数を特定するときは、定義ノードに入っている IR 名から引くのが
+//   確実です（関数もメソッドも同じ 1 行で済む）。
+static FuncSig *lookup_func_by_ir(Sema *s, const char *ir_name) {
+    for (FuncSig *f = s->funcs; f; f = f->next)
+        if (strcmp(f->ir_name, ir_name) == 0) return f;
     return NULL;
 }
 
@@ -177,8 +262,32 @@ static char *unique_ir_name(Sema *s, char *name) {
     }
 }
 
+// ★ 第13章：モジュール名と同じ名前は宣言できない（13.5 節）。
+//
+//   import lexer
+//   lexer: int = 1      ← エラー
+//
+// 「lexer.x」の lexer が変数かモジュールか、読む人が迷うからです。
+// コンパイラは「変数優先」と決めれば動きますが、それは規則を覚える負担を
+// 利用者に押しつけることになります。第7章のシャドーイング禁止と同じ判断です。
+static void reject_module_name(Sema *s, const char *name, Token *tok,
+                               const char *what) {
+    ModuleSyms *ms = lookup_import(s, name);
+    if (!ms) return;
+
+    Diag d = {0};
+    d.message = diag_fmt("'%s' は import したモジュールの名前です", name);
+    d.primary.tok = tok;
+    d.primary.label = diag_fmt("この名前の%sは宣言できません", what);
+    d.hint = diag_fmt("モジュール名と同じ名前を使うと '%s.x' が曖昧になります",
+                      name);
+    diag_fail(&d);
+}
+
 // ローカル変数として登録する（IR 名は %x 形式）
 static VarEntry *declare(Sema *s, char *name, Type *type, Token *tok) {
+    reject_module_name(s, name, tok, "変数");
+
     StrBuf sb;
     sb_init(&sb);
     sb_printf(&sb, "%%%s", unique_ir_name(s, name));
@@ -212,6 +321,36 @@ static Type *check_field(Sema *s, Node *n);
 // ★ 「名前から型への解決は sema の仕事」（第5章の判断 #47）が、
 //   複合型になっても同じ形で通用します。
 static Type *resolve_type(Sema *s, Node *tr) {
+    // ★ 第13章：lexer.Token のようにモジュール修飾された型注釈。
+    //   引く表が「自分のモジュール」から「そのモジュール」に変わるだけです。
+    if (tr->mod_name) {
+        ModuleSyms *ms = lookup_import(s, tr->mod_name);
+        if (!ms) {
+            Diag d = {0};
+            d.message = diag_fmt("モジュール '%s' を import していません", tr->mod_name);
+            d.primary.tok = tr->tok;
+            d.primary.label = "この修飾を解決できません";
+            d.hint = diag_fmt("ファイルの先頭に 'import %s' を書いてください",
+                              tr->mod_name);
+            diag_fail(&d);
+        }
+        Class *c = lookup_class_in(ms, tr->name);
+        if (!c) {
+            Diag d = {0};
+            d.message = diag_fmt("モジュール '%s' にクラス '%s' はありません",
+                                 tr->mod_name, tr->name);
+            d.primary.tok = tr->tok;
+            d.primary.label = "このクラスは定義されていません";
+            d.hint = "他のモジュールから使えるのはクラスだけです"
+                     "（int や list はモジュール修飾なしで書きます）";
+            diag_fail(&d);
+        }
+        if (tr->lhs)
+            error_at_hint(tr->tok, "要素型を取るのは list だけです",
+                          "型 '%s.%s' は要素型を取りません", tr->mod_name, tr->name);
+        return c->type;
+    }
+
     if (strcmp(tr->name, "list") == 0) {
         if (!tr->lhs)
             error_at_hint(tr->tok, "要素型を書いてください（例: list[int]）",
@@ -241,6 +380,21 @@ static Type *resolve_type(Sema *s, Node *tr) {
     d.primary.label = "この型は存在しません";
     d.hint = diag_fmt("現在使える型: %s、および定義したクラス名", type_name_list());
     diag_fail(&d);
+}
+
+// ★ 第13章：同名の別クラスだったときは、モジュール修飾つきで説明する。
+//
+//   x: a.Box = b.Box()     →  「型 'Box' の式」だけでは何が起きたか分からない
+//
+// 型が同じかどうかは名前ではなく定義で決まります（第12章の判断）。
+// その判断の結果を、利用者に読める言葉で見せるための一言です。
+static const char *no_implicit_hint(Type *got, Type *want) {
+    if (got->kind == TY_CLASS && want->kind == TY_CLASS &&
+        strcmp(got->cls->name, want->cls->name) == 0)
+        return diag_fmt("'%s' と '%s' は名前が同じだけの別のクラスです"
+                        "（同じ型かどうかは名前ではなく定義で決まります）",
+                        got->cls->ir_name, want->cls->ir_name);
+    return "Mython には暗黙の型変換がありません（言語仕様 3.5）";
 }
 
 // 二項演算子が、その型に適用できるか
@@ -300,7 +454,7 @@ static Type *check_binop(Sema *s, Node *n) {
                              type_name(l), type_name(r), op_symbol(n->op));
         d.primary.tok = n->tok;
         d.primary.label = "この演算子の両辺の型が違います";
-        d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+        d.hint = no_implicit_hint(l, r);
         diag_fail(&d);
     }
 
@@ -374,6 +528,28 @@ static Type *check_unary(Sema *s, Node *n) {
 static Type *check_var(Sema *s, Node *n) {
     VarEntry *v = lookup(s, n->name);
     if (!v) {
+        // ★ 第13章：モジュール名そのものは値ではありません。
+        if (lookup_import(s, n->name)) {
+            Diag d = {0};
+            d.message = diag_fmt("モジュール '%s' は値として使えません", n->name);
+            d.primary.tok = n->tok;
+            d.primary.label = "ここにはモジュール名を書けません";
+            d.hint = diag_fmt("モジュールの中身は '%s.名前' の形で使います", n->name);
+            diag_fail(&d);
+        }
+
+        // 同名のモジュールが存在するのに import していない場合。
+        // ★ 「未定義の名前です」で突き放さず、書き忘れを指摘します。
+        if (module_file_exists(s->cur->mod->dir, n->name)) {
+            Diag d = {0};
+            d.message = diag_fmt("モジュール '%s' を import していません", n->name);
+            d.primary.tok = n->tok;
+            d.primary.label = "このモジュールはここからは見えません";
+            d.hint = diag_fmt("ファイルの先頭に 'import %s' を書いてください",
+                              n->name);
+            diag_fail(&d);
+        }
+
         Diag d = {0};
         d.message = diag_fmt("未定義の名前 '%s' です", n->name);
         d.primary.tok = n->tok;
@@ -480,6 +656,7 @@ static void check_vardecl(Sema *s, Node *n) {
         d.related.label =
             diag_fmt("変数 '%s' は '%s' 型として宣言されています", n->name,
                      type_name(declared));
+        d.hint = no_implicit_hint(actual, declared);
         diag_fail(&d);
     }
 
@@ -516,7 +693,7 @@ static void check_assign(Sema *s, Node *n) {
             d.primary.label = diag_fmt("型 '%s' の式", type_name(actual));
             d.related.tok = target->tok;
             d.related.label = diag_fmt("この要素は '%s' 型です", type_name(et));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(actual, et);
             diag_fail(&d);
         }
         n->type = et;
@@ -541,7 +718,7 @@ static void check_assign(Sema *s, Node *n) {
             d.related.tok = target->field->tok;
             d.related.label = diag_fmt("フィールド '%s' は '%s' 型として宣言されています",
                                        target->field->name, type_name(ft));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(actual, ft);
             diag_fail(&d);
         }
         n->type = ft;
@@ -744,7 +921,51 @@ static Type *check_index_expr(Sema *s, Node *n) {
 }
 
 // フィールドアクセスの検査（型システム 5.9。第12章）
+// 「'.' の左がモジュールか」を判定する（第13章。13.5 節の名前解決の順序）。
+//
+// ★ 変数が先、モジュールは最後。ただしモジュール名と同じ名前の変数は
+//   宣言できない（declare_* で弾く）ので、実際には競合しません。
+//   それでも順序を実装の順序としてそのまま書いておきます。
+static ModuleSyms *dot_module(Sema *s, Node *n) {
+    if (n->lhs->kind != ND_VAR) return NULL;
+    if (lookup(s, n->lhs->name)) return NULL;
+    return lookup_import(s, n->lhs->name);
+}
+
+// lexer.MAX_KIND — 他のモジュールのグローバル変数
+static Type *check_module_global(Sema *s, Node *n, ModuleSyms *ms) {
+    VarEntry *v = lookup_global_in(ms, n->name);
+    if (!v) {
+        Diag d = {0};
+        d.message = diag_fmt("モジュール '%s' に '%s' はありません", ms->mod->name,
+                             n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この名前は定義されていません";
+        if (lookup_func_in(ms, n->name))
+            d.hint = diag_fmt("'%s' は関数です。'%s.%s(...)' と呼んでください",
+                              n->name, ms->mod->name, n->name);
+        else if (lookup_class_in(ms, n->name))
+            d.hint = diag_fmt("'%s' はクラスです。生成するには '%s.%s(...)' と"
+                              "書いてください",
+                              n->name, ms->mod->name, n->name);
+        else
+            d.hint = "モジュールから使えるのは、そのファイルのトップレベルの"
+                     "関数・クラス・グローバル変数です";
+        diag_fail(&d);
+    }
+
+    // ★ codegen への記録。ND_FIELD のままだが「グローバル変数の読み書き」になる。
+    n->mod_name = ms->mod->name;
+    n->ir_name = v->ir_name;
+    n->is_global = true;
+    n->is_extern = ms != s->cur;
+    return v->type;
+}
+
 static Type *check_field(Sema *s, Node *n) {
+    ModuleSyms *ms = dot_module(s, n);
+    if (ms) return check_module_global(s, n, ms);
+
     Type *ot = check_expr(s, n->lhs);
 
     if (ot->kind != TY_CLASS) {
@@ -778,8 +999,10 @@ static Type *check_field(Sema *s, Node *n) {
 // ★ 「関数呼び出しの検査に self を 1 個足すだけ」です。
 //   名前を修飾して関数表に載せておいたので、引ける表は第8章のまま。
 static Type *check_class_method(Sema *s, Node *n, Class *c) {
+    // ★ 第13章：メソッドは「クラスが定義されたモジュール」の表にいます。
+    //   自分のモジュールの表を引くと、import したクラスのメソッドが見つかりません。
     char *mname = mangle(c->name, n->name);
-    FuncSig *f = lookup_func(s, mname);
+    FuncSig *f = lookup_func_in(c->owner, mname);
     if (!f) {
         Diag d = {0};
         d.message = diag_fmt("クラス '%s' にメソッド '%s' はありません", c->name,
@@ -824,17 +1047,56 @@ static Type *check_class_method(Sema *s, Node *n, Class *c) {
             d.related.tok = f->tok;
             d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i + 1],
                                        type_name(f->params[i + 1]));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(at, f->params[i + 1]);
             diag_fail(&d);
         }
     }
 
-    n->ir_name = mname;  // ★ codegen が呼ぶ関数名（@Token.show）
+    // ★ codegen が呼ぶ関数名（@lexer.Token.show）。
+    //   import したクラスのメソッドなら declare も要る（第13章）。
+    n->ir_name = f->ir_name;
+    n->is_extern = f->owner != s->cur;
     return f->ret;
 }
 
 // メソッド呼び出しの検査（第10章の list.append と、第12章のクラスのメソッド）
+// lexer.make(1, "x") / lexer.Token(1, "x") — 他のモジュールの関数・クラス
+static Type *check_new(Sema *s, Node *n, Class *c);
+static Type *check_call_sig(Sema *s, Node *n, FuncSig *f, const char *what);
+
+static Type *check_module_call(Sema *s, Node *n, ModuleSyms *ms) {
+    n->mod_name = ms->mod->name;
+
+    // ★ 名前がクラスなら、これはインスタンス生成（第12章の分岐がそのまま）
+    Class *c = lookup_class_in(ms, n->name);
+    if (c) {
+        n->is_extern = ms != s->cur;  // codegen が init を declare する判断
+        return check_new(s, n, c);
+    }
+
+    FuncSig *f = lookup_func_in(ms, n->name);
+    if (!f) {
+        Diag d = {0};
+        d.message = diag_fmt("モジュール '%s' に関数 '%s' はありません",
+                             ms->mod->name, n->name);
+        d.primary.tok = n->tok;
+        d.primary.label = "この関数は定義されていません";
+        d.hint = lookup_global_in(ms, n->name)
+                     ? diag_fmt("'%s' はグローバル変数です。'()' を外してください",
+                                n->name)
+                     : "そのモジュールのトップレベルに def があるか確認してください";
+        diag_fail(&d);
+    }
+
+    n->ir_name = f->ir_name;
+    n->is_extern = f->owner != s->cur;
+    return check_call_sig(s, n, f, "関数");
+}
+
 static Type *check_method(Sema *s, Node *n) {
+    ModuleSyms *ms = dot_module(s, n);
+    if (ms) return check_module_call(s, n, ms);
+
     Type *ot = check_expr(s, n->lhs);
 
     if (ot->kind == TY_CLASS) return check_class_method(s, n, ot->cls);
@@ -864,7 +1126,7 @@ static Type *check_method(Sema *s, Node *n) {
                                  type_name(ot->elem), type_name(at));
             d.primary.tok = n->args->tok;
             d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(at, ot->elem);
             diag_fail(&d);
         }
         return ty_none;
@@ -909,7 +1171,7 @@ static Type *check_new(Sema *s, Node *n, Class *c) {
     }
 
     // init があるなら、その引数と突き合わせる（self は飛ばす）
-    FuncSig *f = lookup_func(s, mangle(c->name, "init"));
+    FuncSig *f = lookup_func_in(c->owner, mangle(c->name, "init"));
     if (nargs != f->nparams - 1) {
         Diag d = {0};
         d.message = diag_fmt("'%s' の生成には %d 個の引数が必要ですが、%d 個渡されました",
@@ -937,7 +1199,7 @@ static Type *check_new(Sema *s, Node *n, Class *c) {
             d.related.tok = f->tok;
             d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i + 1],
                                        type_name(f->params[i + 1]));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(at, f->params[i + 1]);
             diag_fail(&d);
         }
     }
@@ -964,13 +1226,28 @@ static Type *check_call(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    // ③ 引数の個数（② の「呼び出し可能か」は構文が保証している）
+    // ★ 第13章：呼ぶ相手の IR 名（モジュール修飾済み）を codegen に渡す
+    n->ir_name = f->ir_name;
+    n->is_extern = f->owner != s->cur;
+
+    // ③④ 引数の個数と型
+    return check_call_sig(s, n, f, "関数");
+}
+
+// 呼び出しの引数を FuncSig と突き合わせる（第8章の ③④）。
+//
+// ★ 第13章：モジュール修飾の呼び出し（lexer.make(1)）でも同じ検査が要るので、
+//   関数に切り出しました。呼ぶ側が変わっても、検査は 1 か所のままです。
+static Type *check_call_sig(Sema *s, Node *n, FuncSig *f, const char *what) {
+    const char *shown = n->mod_name ? diag_fmt("%s.%s", n->mod_name, n->name)
+                                    : f->name;
+
     int nargs = 0;
     for (Node *a = n->args; a; a = a->next) nargs++;
     if (nargs != f->nparams) {
         Diag d = {0};
-        d.message = diag_fmt("関数 '%s' は %d 個の引数を取りますが、%d 個渡されました",
-                             f->name, f->nparams, nargs);
+        d.message = diag_fmt("%s '%s' は %d 個の引数を取りますが、%d 個渡されました",
+                             what, shown, f->nparams, nargs);
         d.primary.tok = n->tok;
         d.primary.label = "呼び出しの引数の個数が違います";
         d.related.tok = f->tok;
@@ -978,21 +1255,22 @@ static Type *check_call(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    // ④ 各引数の型
     int i = 0;
     for (Node *a = n->args; a; a = a->next, i++) {
+        // ⚠️ 引数には期待型を渡しません（第10章の判断のまま）。
+        //    take([]) の [] は「型注釈を書いてください」というエラーになります。
         Type *at = check_expr(s, a);
         if (!type_equal(at, f->params[i])) {
             Diag d = {0};
-            d.message = diag_fmt("関数 '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
-                                 f->name, i + 1, type_name(at),
+            d.message = diag_fmt("%s '%s' の第 %d 引数: 型 '%s' を '%s' に渡せません",
+                                 what, shown, i + 1, type_name(at),
                                  type_name(f->params[i]));
             d.primary.tok = a->tok;
             d.primary.label = diag_fmt("これは '%s' 型です", type_name(at));
             d.related.tok = f->tok;
             d.related.label = diag_fmt("引数 '%s' は '%s' 型です", f->pnames[i],
                                        type_name(f->params[i]));
-            d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+            d.hint = no_implicit_hint(at, f->params[i]);
             diag_fail(&d);
         }
     }
@@ -1038,7 +1316,7 @@ static void check_return(Sema *s, Node *n) {
         d.related.tok = s->cur_func->tok;
         d.related.label = diag_fmt("関数 '%s' の戻り型は '%s' です", s->cur_func->name,
                                    type_name(want));
-        d.hint = "Mython には暗黙の型変換がありません（言語仕様 3.5）";
+        d.hint = no_implicit_hint(got, want);
         diag_fail(&d);
     }
 }
@@ -1130,6 +1408,7 @@ static bool always_returns(Node *n) {
 
 // 1a：クラス名と Type を作る。中身はまだ見ない。
 static void declare_class(Sema *s, Node *n) {
+    reject_module_name(s, n->name, n->tok, "クラス");
     if (type_from_name(n->name))
         error_at_hint(n->tok, diag_fmt("'%s' は組み込みの型名です", n->name),
                       "クラス名 '%s' は使えません", n->name);
@@ -1150,6 +1429,8 @@ static void declare_class(Sema *s, Node *n) {
 
     Class *c = xmalloc(sizeof(Class));
     c->name = n->name;
+    c->ir_name = mod_mangle(s, n->name);  // ★ 第13章：%lexer.Token.type になる
+    c->owner = s->cur;                    // メソッドはこのモジュールの表にいる
     c->tok = n->tok;
     c->node = n;
     c->type = type_class(n->name, c);  // ★ クラスにつき Type は 1 個だけ
@@ -1246,10 +1527,12 @@ static void declare_method(Sema *s, Class *c, Node *fn) {
         c->has_init = true;
     }
 
+    f->ir_name = mangle(c->ir_name, fn->name);  // "lexer.Token.show"（第13章）
+    f->owner = s->cur;
     f->next = s->funcs;
     s->funcs = f;
 
-    fn->ir_name = mname;  // ★ codegen が define する関数名（@Token.show）
+    fn->ir_name = f->ir_name;  // ★ codegen が define する関数名（@lexer.Token.show）
     fn->type = ret;
 }
 
@@ -1297,6 +1580,7 @@ static void declare_class_members(Sema *s, Node *n) {
 }
 
 static void declare_func(Sema *s, Node *n) {
+    reject_module_name(s, n->name, n->tok, "関数");
     if (lookup_class(s, n->name)) {
         Diag d = {0};
         d.message = diag_fmt("'%s' はクラス名として使われています", n->name);
@@ -1348,13 +1632,17 @@ static void declare_func(Sema *s, Node *n) {
         pm->type = pt;
     }
 
+    f->ir_name = mod_mangle(s, n->name);  // ★ 第13章："lexer.make"
+    f->owner = s->cur;
     f->next = s->funcs;
     s->funcs = f;
+    n->ir_name = f->ir_name;
     n->type = ret;
 }
 
 // グローバル変数の登録（言語仕様 6.2）
 static void declare_global(Sema *s, Node *n) {
+    reject_module_name(s, n->name, n->tok, "グローバル変数");
     Type *declared = resolve_type(s, n->type_ref);
     if (declared->kind == TY_NONE)
         error_at_hint(n->tok, "None 型の値は存在しないので変数にできません",
@@ -1395,10 +1683,12 @@ static void declare_global(Sema *s, Node *n) {
         diag_fail(&d);
     }
 
-    // グローバルの IR 名は @g.x。C のシンボルや @main と衝突させないため。
+    // グローバルの IR 名は @g.<モジュール>.<名前>。
+    // ★ 第13章：モジュール名を挟むことで、別ファイルの同名グローバルと
+    //   リンク時に衝突しなくなります（@g. は C のシンボルとの衝突よけ。第8章）。
     StrBuf sb;
     sb_init(&sb);
-    sb_printf(&sb, "@g.%s", n->name);
+    sb_printf(&sb, "@g.%s.%s", s->cur->mod->name, n->name);
 
     VarEntry *v = xmalloc(sizeof(VarEntry));
     v->name = n->name;
@@ -1417,9 +1707,9 @@ static void declare_global(Sema *s, Node *n) {
 // ── パス 2：本体の検査 ─────────────────────────────────────
 
 static void check_func(Sema *s, Node *n) {
-    // ★ 第12章：メソッドは修飾名（Token.show）で表に載っています。
-    //   ir_name があればそれが表の鍵。無ければ今までどおり関数名。
-    s->cur_func = lookup_func(s, n->ir_name ? n->ir_name : n->name);
+    // ★ 第12章：メソッドは修飾名で表に載っています。第13章ではそこに
+    //   モジュール名も付くので、定義ノードの IR 名から引きます。
+    s->cur_func = lookup_func_by_ir(s, n->ir_name);
     s->used = NULL;  // IR 名は関数ごとに振り直す（別の関数なら衝突しない）
 
     scope_push(s);
@@ -1467,42 +1757,76 @@ static void check_main(Sema *s, Node *ast) {
                       "main の戻り型は int でなければなりません");
 }
 
-void sema(Node *ast) {
-    if (ast->kind != ND_BLOCK) UNREACHABLE();
-
-    Sema s = {0};
-    scope_push(&s);  // グローバルスコープ
-
-    // ── パス 1：宣言を先に全部登録する ──
-    // ★ 本体を見る前に登録するので、前方参照も再帰も自然に通ります。
-    //   C がプロトタイプ宣言を要求するのは、この 2 パスを人間にやらせているからです。
-
+// モジュール 1 つぶんの宣言を登録する（パス 1a / 1b / 1c）
+static void declare_module(Sema *s, Node *ast) {
     // 1a：クラス名だけ先に登録する（クラスどうしが互いを参照できるように）
     for (Node *d = ast->body; d; d = d->next)
-        if (d->kind == ND_CLASS) declare_class(&s, d);
+        if (d->kind == ND_CLASS) declare_class(s, d);
 
     // 1b：フィールドとメソッド（型注釈に他のクラスを書ける）
     for (Node *d = ast->body; d; d = d->next)
-        if (d->kind == ND_CLASS) declare_class_members(&s, d);
+        if (d->kind == ND_CLASS) declare_class_members(s, d);
 
     // 1c：トップレベルの関数とグローバル変数（引数の型にクラスを書ける）
     for (Node *d = ast->body; d; d = d->next) {
-        if (d->kind == ND_FUNC) declare_func(&s, d);
-        else if (d->kind == ND_VARDECL) declare_global(&s, d);
+        if (d->kind == ND_FUNC) declare_func(s, d);
+        else if (d->kind == ND_VARDECL) declare_global(s, d);
         else if (d->kind == ND_CLASS) continue;  // 1a / 1b で済んでいる
+        else if (d->kind == ND_IMPORT) continue;  // 読み込みは module.c が済ませた
         else UNREACHABLE();  // parser が保証している
     }
+}
 
-    // ── パス 2：本体を検査する ──
+// モジュール 1 つぶんの本体を検査する（パス 2）
+static void check_module(Sema *s, Node *ast) {
     for (Node *d = ast->body; d; d = d->next) {
-        if (d->kind == ND_FUNC) check_func(&s, d);
+        if (d->kind == ND_FUNC) check_func(s, d);
         // メソッドの本体も、ふつうの関数とまったく同じ手順で検査します。
         // self はもう「型が入った引数」なので、特別扱いは 1 つも要りません。
         else if (d->kind == ND_CLASS)
             for (Node *m = d->body; m; m = m->next)
-                if (m->kind == ND_FUNC) check_func(&s, m);
+                if (m->kind == ND_FUNC) check_func(s, m);
+    }
+}
+
+// ★ 第13章：意味解析の単位が「1 つの AST」から「全モジュール」になりました。
+//
+//   パス 0   読み込みと構文解析（module.c が依存順に並べて渡してくる）
+//   パス 1   モジュールごとに宣言を登録する    ← 依存順なので、
+//   パス 2   モジュールごとに本体を検査する       先に登録済みのものだけを参照する
+//
+// 第8章（関数の前方参照）・第12章（クラスの相互参照）と同じ「先に全部登録」を、
+// ファイル単位でもう 1 回やっているだけです。
+void sema_program(Module *mods, Module *entry) {
+    Sema s = {0};
+
+    // 各モジュールのシンボル表を用意する（この時点では空）
+    ModuleSyms *tail = NULL;
+    for (Module *m = mods; m; m = m->next) {
+        if (m->ast->kind != ND_BLOCK) UNREACHABLE();
+        ModuleSyms *ms = xmalloc(sizeof(ModuleSyms));
+        ms->mod = m;
+        ms->globals = xmalloc(sizeof(Scope));
+        m->syms = ms;
+        if (tail) tail->next = ms;
+        else s.mods = ms;
+        tail = ms;
     }
 
-    check_main(&s, ast);
-    scope_pop(&s);
+    // パス 1：依存が先に並んでいるので、この順で登録すれば
+    //         「他モジュールの型注釈」は必ず解決できる
+    for (ModuleSyms *ms = s.mods; ms; ms = ms->next) {
+        enter_module(&s, ms);
+        declare_module(&s, ms->mod->ast);
+    }
+
+    // パス 2：本体
+    for (ModuleSyms *ms = s.mods; ms; ms = ms->next) {
+        enter_module(&s, ms);
+        check_module(&s, ms->mod->ast);
+    }
+
+    // main は入口モジュールにだけ要る（他のモジュールにあっても構わない）
+    enter_module(&s, entry->syms);
+    check_main(&s, entry->ast);
 }

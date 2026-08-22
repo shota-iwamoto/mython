@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "diag.h"
+#include "module.h"
 #include "sema.h"
 
 #include <stdio.h>
@@ -45,6 +46,10 @@ typedef struct {
     struct StrLit *strs;
     struct StrLit *decled;
     int str_counter;
+
+    // ── 第13章：モジュール ──
+    Node *ast;             // 今生成しているモジュールの AST
+    struct StrLit *types;  // 型定義を出済みのクラス（重複排除）
 } Emitter;
 
 // 出力済みの文字列リテラル / declare を覚えておくための小さなリスト。
@@ -280,6 +285,10 @@ static char *intern_str(Emitter *e, const char *bytes, int len) {
 }
 
 // ランタイム関数を宣言する（1 回だけ）。
+static const char *class_type(Emitter *e, Class *c);  // 第13章
+static void declare_extern(Emitter *e, const char *ret, const char *ir_name,
+                           const char *param_types);
+
 static void declare_rt(Emitter *e, const char *sig) {
     for (StrLit *d = e->decled; d; d = d->next)
         if (strcmp(d->label, sig) == 0) return;
@@ -580,28 +589,63 @@ static void gen_index_store(Emitter *e, Node *target, char *val) {
               v);
 }
 
+static char *gen_new(Emitter *e, Node *n);
+
+// 引数を評価して "型 値, 型 値" と "型, 型"（declare 用）を同時に作る
+static void gen_args(Emitter *e, Node *args, StrBuf *vals, StrBuf *types,
+                     bool first) {
+    for (Node *a = args; a; a = a->next) {
+        char *v = gen_expr(e, a);
+        sb_printf(vals, "%s%s %s", first ? "" : ", ", llvm_type(a->type), v);
+        sb_printf(types, "%s%s", first ? "" : ", ", llvm_type(a->type));
+        first = false;
+    }
+}
+
+// 呼び出しを 1 行出す（戻り値が None なら値を返さない）
+static char *emit_call(Emitter *e, Node *n, const char *args) {
+    if (n->type->kind == TY_NONE) {
+        sb_printf(&e->fn, "  call void @%s(%s)\n", n->ir_name, args);
+        return NULL;
+    }
+    char *t = new_tmp(e);
+    sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type), n->ir_name,
+              args);
+    return t;
+}
+
 static char *gen_method(Emitter *e, Node *n) {
+    // ★ 第13章：'.' の左がモジュールだった場合。sema が記録を残している。
+    if (n->mod_name) {
+        if (n->cls) return gen_new(e, n);  // lexer.Token(1, "x")
+
+        StrBuf args, types;
+        sb_init(&args);
+        sb_init(&types);
+        gen_args(e, n->args, &args, &types, true);
+        if (n->is_extern)
+            declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+        return emit_call(e, n, sb_str(&args));
+    }
+
     // クラスのメソッド（第12章）。self を第 1 引数に渡すだけ。
-    // ★ 呼ぶ関数名は sema が修飾済み（n->ir_name = "Token.show"）。
+    // ★ 呼ぶ関数名は sema が修飾済み（n->ir_name = "lexer.Token.show"）。
     if (n->lhs->type->kind == TY_CLASS) {
         char *obj = gen_expr(e, n->lhs);
 
-        StrBuf args;
+        StrBuf args, types;
         sb_init(&args);
+        sb_init(&types);
         sb_printf(&args, "ptr %s", obj);
-        for (Node *a = n->args; a; a = a->next) {
-            char *v = gen_expr(e, a);
-            sb_printf(&args, ", %s %s", llvm_type(a->type), v);
-        }
+        sb_printf(&types, "ptr");
+        gen_args(e, n->args, &args, &types, false);
 
-        if (n->type->kind == TY_NONE) {
-            sb_printf(&e->fn, "  call void @%s(%s)\n", n->ir_name, sb_str(&args));
-            return NULL;
-        }
-        char *t = new_tmp(e);
-        sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type),
-                  n->ir_name, sb_str(&args));
-        return t;
+        // ★ 第13章：import したクラスのメソッドは、このモジュールには
+        //   定義がないので declare する（sema が is_extern を立てている）。
+        if (n->is_extern)
+            declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+
+        return emit_call(e, n, sb_str(&args));
     }
 
     // list.append（第10章。sema が保証している）
@@ -642,11 +686,35 @@ static char *gen_field_ptr(Emitter *e, Node *n) {
     //    ここを 1 にすると隣のオブジェクトがある場所を読みます。
     char *t = new_tmp(e);
     sb_printf(&e->fn, "  %s = getelementptr %%%s.type, ptr %s, i32 0, i32 %d\n", t,
-              c->name, ok, n->field->index);
+              class_type(e, c), ok, n->field->index);
     return t;
 }
 
+// 他モジュールのグローバル変数は、使う側の .ll に external で宣言する。
+//   @g.lexer.MAX_KIND = external global i64
+static void declare_extern_global(Emitter *e, Node *n) {
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "%s = external global %s", n->ir_name, llvm_mem_type(n->type));
+
+    for (StrLit *d = e->decled; d; d = d->next)
+        if (strcmp(d->label, sb_str(&sig)) == 0) return;
+
+    sb_printf(&e->globals, "%s\n", sb_str(&sig));
+    StrLit *d = xmalloc(sizeof(StrLit));
+    d->label = sb_str(&sig);
+    d->next = e->decled;
+    e->decled = d;
+}
+
 static char *gen_field(Emitter *e, Node *n) {
+    // ★ 第13章：'.' の左がモジュールなら、これはグローバル変数の読み出し。
+    //   ND_FIELD のままだが、sema が ir_name を入れているので変数と同じ扱い。
+    if (n->mod_name) {
+        if (n->is_extern) declare_extern_global(e, n);
+        return gen_load(e, n->type, n->ir_name);
+    }
+
     // ★ 読み書きは第6章の gen_load / gen_store をそのまま使います。
     //   bool フィールドの i8 ↔ i1 変換（規約 R5）は、何も書かずに手に入ります。
     return gen_load(e, n->type, gen_field_ptr(e, n));
@@ -680,29 +748,52 @@ static char *gen_new(Emitter *e, Node *n) {
         }
         char *p = new_tmp(e);
         sb_printf(&e->fn, "  %s = getelementptr %%%s.type, ptr %s, i32 0, i32 %d\n",
-                  p, c->name, obj, f->index);
+                  p, class_type(e, c), obj, f->index);
         sb_printf(&e->fn, "  store ptr %s, ptr %s\n", val, p);
     }
 
     if (!c->has_init) return obj;
 
     // init は「self を第 1 引数に取るふつうの関数」（規約 R8 がそのまま働く）
-    StrBuf args;
+    StrBuf args, ptypes;
     sb_init(&args);
+    sb_init(&ptypes);
     sb_printf(&args, "ptr %s", obj);
+    sb_printf(&ptypes, "ptr");
     for (Node *a = n->args; a; a = a->next) {
         char *v = gen_expr(e, a);
         sb_printf(&args, ", %s %s", llvm_type(a->type), v);
+        sb_printf(&ptypes, ", %s", llvm_type(a->type));
     }
-    sb_printf(&e->fn, "  call void @%s.init(%s)\n", c->name, sb_str(&args));
+
+    StrBuf init;
+    sb_init(&init);
+    sb_printf(&init, "%s.init", c->ir_name);
+
+    // ★ 第13章：別モジュールのクラスなら declare が要る
+    if (n->is_extern) declare_extern(e, "void", sb_str(&init), sb_str(&ptypes));
+
+    sb_printf(&e->fn, "  call void @%s(%s)\n", sb_str(&init), sb_str(&args));
     return obj;
 }
 
-// クラスの型定義を出す：%Token.type = type { i64, ptr }
+// クラスの型定義を出す：%lexer.Token.type = type { i64, ptr }
 //
 // ★ フィールドの LLVM 型は「メモリ上の型」（bool は i8。規約 R5）。
+// ⚠️ 第13章：LLVM の型定義はモジュールローカルです。import したクラスを
+//    使うモジュールにも、同じ定義を書き直す必要があります。レイアウトは
+//    コンパイラのプロセス内で 1 回だけ計算した Class * を共有しているので、
+//    2 つの .ll が食い違うことはありません（13.7 節）。
 static void gen_class_type(Emitter *e, Class *c) {
-    sb_printf(&e->header, "%%%s.type = type { ", c->name);
+    for (StrLit *t = e->types; t; t = t->next)
+        if (strcmp(t->label, c->ir_name) == 0) return;  // 出済み
+
+    StrLit *t = xmalloc(sizeof(StrLit));
+    t->label = c->ir_name;
+    t->next = e->types;
+    e->types = t;
+
+    sb_printf(&e->header, "%%%s.type = type { ", c->ir_name);
     bool first = true;
     for (Field *f = c->fields; f; f = f->next) {
         sb_printf(&e->header, "%s%s", first ? "" : ", ", llvm_mem_type(f->type));
@@ -711,6 +802,25 @@ static void gen_class_type(Emitter *e, Class *c) {
     // ⚠️ フィールドが 0 個でも空の構造体は書けます（サイズ 0）。
     //    my_alloc(0) は calloc(1, 0) になり、有効なポインタが返ります。
     sb_printf(&e->header, " }\n");
+}
+
+// クラスの型名を返す（まだ出していなければ定義も出す）。
+//
+// ★ 「使ったものだけ出す」ので、import したクラスの型定義も自動で付いてきます。
+static const char *class_type(Emitter *e, Class *c) {
+    gen_class_type(e, c);
+    return c->ir_name;
+}
+
+// 別モジュールの関数を declare する（引数の型は呼び出しから作る）。
+//
+// ★ 第9章の declare_rt と同じ仕組み（使ったものだけ宣言する）。
+static void declare_extern(Emitter *e, const char *ret, const char *ir_name,
+                           const char *param_types) {
+    StrBuf sig;
+    sb_init(&sig);
+    sb_printf(&sig, "%s @%s(%s)", ret, ir_name, param_types);
+    declare_rt(e, sb_str(&sig));
 }
 
 // ── 制御構文の生成（規約 6.3 / 6.4 / 6.5）──────────────────
@@ -843,23 +953,15 @@ static char *gen_call(Emitter *e, Node *n) {
     if (n->cls) return gen_new(e, n);  // ★ 第12章：インスタンス生成
 
     // 引数を左から順に評価する（言語仕様 4.5）
-    StrBuf args;
+    StrBuf args, types;
     sb_init(&args);
-    bool first = true;
-    for (Node *a = n->args; a; a = a->next) {
-        char *v = gen_expr(e, a);
-        sb_printf(&args, "%s%s %s", first ? "" : ", ", llvm_type(a->type), v);
-        first = false;
-    }
+    sb_init(&types);
+    gen_args(e, n->args, &args, &types, true);
 
-    if (n->type->kind == TY_NONE) {
-        sb_printf(&e->fn, "  call void @%s(%s)\n", n->name, sb_str(&args));
-        return NULL;
-    }
-    char *t = new_tmp(e);
-    sb_printf(&e->fn, "  %s = call %s @%s(%s)\n", t, llvm_type(n->type), n->name,
-              sb_str(&args));
-    return t;
+    // ★ 第13章：呼ぶ名前は sema が修飾済み（n->ir_name = "lexer.make"）
+    if (n->is_extern)
+        declare_extern(e, llvm_type(n->type), n->ir_name, sb_str(&types));
+    return emit_call(e, n, sb_str(&args));
 }
 
 // ── 文の生成 ────────────────────────────────────────────────
@@ -915,6 +1017,12 @@ static char *gen_stmt(Emitter *e, Node *n) {
             }
             // フィールドへの代入 t.kind = v（第12章）
             if (n->lhs->kind == ND_FIELD) {
+                // 第13章：lexer.counter = v は「他モジュールのグローバル」への代入
+                if (n->lhs->mod_name) {
+                    if (n->lhs->is_extern) declare_extern_global(e, n->lhs);
+                    gen_store(e, n->type, val, n->lhs->ir_name);
+                    return NULL;
+                }
                 gen_store(e, n->type, val, gen_field_ptr(e, n->lhs));
                 return NULL;
             }
@@ -968,11 +1076,11 @@ static void gen_func(Emitter *e, Node *n) {
     sb_init(&e->allocas);
     sb_init(&e->fn);
 
-    // main はラッパ方式（規約 7 節の方式 A）なので @mython_main として出す。
-    // ★ 第12章：メソッドは sema が修飾名（Token.show）を入れてくれています。
-    const char *ir_name = n->ir_name          ? n->ir_name
-                          : strcmp(n->name, "main") == 0 ? "mython_main"
-                                                         : n->name;
+    // ★ 第13章：関数もメソッドも、sema がモジュール修飾済みの名前を入れています
+    //   （@lexer.make / @lexer.Token.show）。main も例外ではありません。
+    //   「main だけ @mython_main」という第1章からの特別扱いは、
+    //   モジュール修飾がその役目を引き取ったので無くなりました。
+    const char *ir_name = n->ir_name;
 
     // ① 引数を alloca にコピーする（規約 R8）。
     //
@@ -1035,13 +1143,16 @@ static void gen_global(Emitter *e, Node *n) {
 // C の main を出力する。
 //
 // Mython の main は int（= i64）を返しますが、C の main は i32 を返します。
-// そこで「ユーザーの main を @mython_main として出し、@main は
+// そこで「ユーザーの main を @<モジュール>.main として出し、@main は
 // それを呼んで trunc するラッパにする」方式をとります。
 // （ir-conventions.md 第7節の方式 A）
 //
 // 🤔 なぜラッパ方式か：main を他の関数と同じ規則で生成できるので、
 //    コード生成器に「main だけ特別」という分岐が入りません。
-static void gen_c_main(Emitter *e) {
+//
+// ⚠️ 第13章：これを出すのは入口モジュールだけです。
+//    全モジュールが出すと、リンク時に @main が重複します。
+static void gen_c_main(Emitter *e, const char *main_ir_name) {
     e->tmp_counter = 0;
 
     sb_printf(&e->body, "\n");
@@ -1049,7 +1160,7 @@ static void gen_c_main(Emitter *e) {
     sb_printf(&e->body, "entry:\n");
 
     char *t0 = new_tmp(e);
-    sb_printf(&e->body, "  %s = call i64 @mython_main()\n", t0);
+    sb_printf(&e->body, "  %s = call i64 @%s()\n", t0, main_ir_name);
 
     char *t1 = new_tmp(e);
     sb_printf(&e->body, "  %s = trunc i64 %s to i32\n", t1, t0);
@@ -1060,8 +1171,16 @@ static void gen_c_main(Emitter *e) {
 
 // ── 入口 ───────────────────────────────────────────────────
 
-char *codegen(Node *ast, const char *source_name) {
+// モジュール 1 つぶんの IR を作る。
+//
+// ★ 第13章：「1 ファイル = 1 モジュール = 1 つの .ll」（13.2 節）。
+//   import したモジュールのものは、使ったぶんだけ declare / 型定義の複製が
+//   自動で付いてきます（class_type / declare_extern が「出済みか」を見るため）。
+char *codegen(Module *mod, const char *main_ir_name) {
+    Node *ast = mod->ast;
+
     Emitter e = {0};
+    e.ast = ast;
     sb_init(&e.header);
     sb_init(&e.globals);
     sb_init(&e.decls);
@@ -1069,7 +1188,7 @@ char *codegen(Node *ast, const char *source_name) {
 
     // ① ヘッダ
     sb_printf(&e.header, "; Generated by mythonc\n");
-    sb_printf(&e.header, "source_filename = \"%s\"\n", source_name);
+    sb_printf(&e.header, "source_filename = \"%s\"\n", mod->path);
 
     // ⚠️ 規約 R11：target triple は必ず出力する。
     //    書かないと clang が -Woverride-module 警告を出します。
@@ -1088,12 +1207,14 @@ char *codegen(Node *ast, const char *source_name) {
     for (Node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_FUNC) gen_func(&e, d);
         // メソッドも、ふつうの関数とまったく同じ関数で出します。
-        // 違うのは名前（@Token.show）と、第 1 引数が self であることだけ。
+        // 違うのは名前（@lexer.Token.show）と、第 1 引数が self であることだけ。
         if (d->kind == ND_CLASS)
             for (Node *m = d->body; m; m = m->next)
                 if (m->kind == ND_FUNC) gen_func(&e, m);
     }
-    gen_c_main(&e);
+
+    // ⚠️ C の main を出すのは入口モジュールだけ（重複定義になるため）
+    if (main_ir_name) gen_c_main(&e, main_ir_name);
 
     // 4 つのバッファを規定の順に連結する
     StrBuf out;

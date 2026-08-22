@@ -10,9 +10,11 @@
 #define MYTHON_CODEGEN_H
 
 #include "ast.h"
+#include "module.h"
 
-// AST から LLVM IR テキストを生成して返す。
-//   source_name : source_filename に書くファイル名（デバッグ情報用）
-char *codegen(Node *ast, const char *source_name);
+// モジュール 1 つぶんの LLVM IR テキストを生成して返す（第13章）。
+//   main_ir_name : 入口モジュールなら「Mython の main の IR 名」。
+//                  他のモジュールでは NULL（C の main を出すのは入口だけ）。
+char *codegen(Module *mod, const char *main_ir_name);
 
 #endif  // MYTHON_CODEGEN_H

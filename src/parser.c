@@ -1002,15 +1002,31 @@ static Token *type_name_token(Parser *p, const char *what) {
     error_at_hint(t, what, "型名が必要です");
 }
 
-// type_ref ::= IDENT [ "[" type_ref "]" ]
+// type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ]
 //
 // ★ 第10章：型注釈が木になりました。list[list[int]] のように入れ子になるので、
 //   文字列 1 個では表せません。再帰下降なら再帰 1 行で読めます。
+// ★ 第13章：モジュール修飾（lexer.Token）が書けるようになりました。
 static Node *type_ref(Parser *p, const char *what) {
     Token *t = type_name_token(p, what);
 
     Node *n = new_node(ND_TYPEREF, t);
     n->name = t->text;
+
+    // モジュール修飾 lexer.Token（★ 1 段だけ。a.b.Token は書けない）
+    if (tok_is(peek(p), ".")) {
+        advance(p);
+        Token *m = type_name_token(p, "モジュール修飾の後には型名を書きます"
+                                      "（例: lexer.Token）");
+        n->mod_name = n->name;
+        n->name = m->text;
+        n->tok = m;
+        if (tok_is(peek(p), "."))
+            error_at_hint(peek(p),
+                          "モジュールの修飾は 1 段だけです（パッケージはありません）",
+                          "'%s.%s' の後にさらに '.' は書けません", n->mod_name,
+                          n->name);
+    }
 
     Token *open = peek(p);
     if (consume(p, "[")) {
@@ -1216,6 +1232,32 @@ static Node *class_def(Parser *p) {
 //
 // ★ 第8章でトップレベルが「宣言だけ」になりました（言語仕様 6.3）。
 //   実行文は書けません。プログラムの入口は def main() -> int: です。
+// import_stmt ::= "import" IDENT NEWLINE
+//
+// ★ 新しいノード種別はこの 1 つだけです。
+//   式の側（lexer.make(1) / lexer.MAX）は第12章の postfix() がそのまま読みます。
+//   「'.' の左がモジュールかどうか」は名前解決の話なので sema が決めます（13.3 節）。
+static Node *import_stmt(Parser *p) {
+    Token *kw = advance(p);  // "import"
+
+    Token *name_tok = peek(p);
+    if (name_tok->kind != TK_IDENT)
+        error_at_hint(name_tok,
+                      "import の後にはモジュール名を書きます（例: import lexer）",
+                      "モジュール名が必要です");
+    advance(p);
+
+    if (tok_is(peek(p), "."))
+        error_at_hint(peek(p),
+                      "モジュール名にドットは使えません（パッケージはありません）",
+                      "'%s' の後に '.' は書けません", name_tok->text);
+
+    Node *n = new_node(ND_IMPORT, kw);
+    n->name = name_tok->text;
+    expect_newline(p);
+    return n;
+}
+
 static Node *program(Parser *p) {
     // ★ 「ダミーの先頭ノード」を使うと、リスト構築が分岐なしで書けます。
     //   head.next が最初の要素になり、「空かどうか」の場合分けが消えます。
@@ -1232,7 +1274,7 @@ static Node *program(Parser *p) {
             d.message = "予期しないインデントです";
             d.primary.tok = t;
             d.primary.label = "この行が余分に字下げされています";
-            d.hint = "トップレベルに書けるのは def / class とグローバル変数だけです"
+            d.hint = "トップレベルに書けるのは def / class / import とグローバル変数だけです"
                      "（言語仕様 6.3）";
             diag_fail(&d);
         }
@@ -1253,6 +1295,12 @@ static Node *program(Parser *p) {
             continue;
         }
 
+        if (tok_is_kw(t, "import")) {  // 第13章
+            cur->next = import_stmt(p);
+            cur = cur->next;
+            continue;
+        }
+
         // グローバル変数 ::= IDENT ":" type "=" expr NEWLINE
         if (t->kind == TK_IDENT && tok_is(peek_at(p, 1), ":")) {
             cur->next = var_decl(p);
@@ -1265,7 +1313,7 @@ static Node *program(Parser *p) {
         Diag d = {0};
         d.message = "トップレベルに実行文は書けません";
         d.primary.tok = t;
-        d.primary.label = "ここに書けるのは def / class とグローバル変数だけです";
+        d.primary.label = "ここに書けるのは def / class / import とグローバル変数だけです";
         d.hint = "処理は main の中に書いてください:\n"
                  "             def main() -> int:\n"
                  "                 ...\n"
