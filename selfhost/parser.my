@@ -7,6 +7,7 @@
 # ⚠️ 診断の描画（src/diag.c）はまだ移植していません。
 #   位置とメッセージだけを出して止まります（第18章で本物にします）。
 import strings
+import diag
 import ast
 import token
 
@@ -62,29 +63,72 @@ class Parser:
         else:
             return t
 
+    # ★ 第18章：診断の描画を diag.my に載せ替えました。
+    #   メッセージ・ラベル・ヒントの文言も C 版と 1 対 1 に揃えます。
     def fail(self, t: token.Token, msg: str) -> None:
-        panic(t.file + ":" + str(t.line) + ":" + str(t.dcol) + ": error: " + msg)
+        diag.error_at(t, msg)
+
+    def fail_hint(self, t: token.Token, hint: str, msg: str) -> None:
+        diag.error_at_hint(t, hint, msg)
+
+    def fail_full(self, t: token.Token, msg: str, label: str, hint: str) -> None:
+        diag.error_full(t, msg, label, None, "", hint)
 
     def expect_close(self, close: str, open_tok: token.Token) -> token.Token:
         t: token.Token = self.peek()
         if t.is_punct(close):
             return self.advance()
-        self.fail(t, "閉じ括弧 '" + close + "' がありません")
+        diag.error_full(t, "閉じ括弧 '" + close + "' がありません",
+                        "ここに '" + close + "' が必要です",
+                        open_tok, "対応する '" + open_tok.raw + "' はここです",
+                        "括弧の対応を確認してください")
         return t
 
-    def expect(self, kind: int, what: str) -> token.Token:
+    # トークン種別の日本語名（C 版 tok_kind_ja）
+    def kind_ja(self, kind: int) -> str:
+        if kind == token.TK_EOF:
+            return "ファイルの終わり"
+        if kind == token.TK_INT:
+            return "整数"
+        if kind == token.TK_PUNCT:
+            return "記号"
+        if kind == token.TK_IDENT:
+            return "名前"
+        if kind == token.TK_KEYWORD:
+            return "予約語"
+        if kind == token.TK_STR:
+            return "文字列"
+        if kind == token.TK_NEWLINE:
+            return "改行"
+        if kind == token.TK_INDENT:
+            return "字下げ"
+        if kind == token.TK_DEDENT:
+            return "字下げの終わり"
+        panic("parser: unknown token kind")
+        return ""
+
+    def expect(self, kind: int, what: str, hint: str) -> token.Token:
         t: token.Token = self.peek()
         if t.kind == kind:
             return self.advance()
-        self.fail(t, what + "が必要です")
+        diag.error_full(t, what + "が必要です", "ここは" + self.kind_ja(t.kind) + "です",
+                        None, "", hint)
         return t
 
     def expect_newline(self) -> None:
-        self.expect(token.TK_NEWLINE, "改行")
+        t: token.Token = self.peek()
+        if t.kind != token.TK_NEWLINE:
+            diag.error_full(t, "文の後に余分なトークンがあります",
+                            "ここから先が解釈できません", None, "",
+                            "1 行に書けるのは 1 つの文です（改行で区切ってください）")
+        self.advance()
 
     def expect_colon(self, what: str) -> None:
-        if self.consume(":") is None:
-            self.fail(self.peek(), what + "の後に ':' が必要です")
+        if self.consume(":") is not None:
+            return
+        diag.error_full(self.peek(), what + "の後に ':' が必要です",
+                        "ここに ':' が必要です", None, "",
+                        "ブロックを開く行は ':' で終わり、次の行を字下げします")
 
     # ── 式（優先順位の階層。C 版と同じ順序で並べる）────────
 
@@ -144,8 +188,14 @@ class Parser:
             return ast.new_bool_node(t, False)
 
         if t.kind == token.TK_KEYWORD:
-            self.fail(t, "'" + t.text + "' は予約語です")
-        self.fail(t, "式が必要です")
+            self.fail_hint(t, "予約語は変数名として使えません（言語仕様 2.5）",
+                           "'" + t.text + "' は予約語です")
+
+        label: str = "ここには式が来るはずです"
+        if t.kind == token.TK_EOF:
+            label = "ここでファイルが終わっています"
+        self.fail_full(t, "式が必要です", label,
+                       "式とは整数リテラル、変数名、または '(' で囲んだ式のことです")
         return ast.new_node(ast.ND_PASS, t)
 
     # postfix ::= primary { "[" expr "]" | "." IDENT [ "(" args ")" ] | "(" args ")" }
@@ -168,7 +218,10 @@ class Parser:
             if self.consume(".") is not None:
                 name_tok: token.Token = self.peek()
                 if name_tok.kind != token.TK_IDENT:
-                    self.fail(name_tok, "フィールド名かメソッド名が必要です")
+                    self.fail_hint(name_tok,
+                                   "'.' の後にはフィールド名かメソッド名を書きます" +
+                                   "（例: t.kind / xs.append(1)）",
+                                   "フィールド名かメソッド名が必要です")
                 self.advance()
 
                 mopen: token.Token = self.peek()
@@ -192,7 +245,9 @@ class Parser:
 
             # 呼べるのは名前だけ（第一級関数は v1 未対応）
             if n.kind != ast.ND_VAR:
-                self.fail(self.peek(), "この式は呼び出せません")
+                self.fail_full(self.tok_of(n), "この式は呼び出せません",
+                               "呼び出せるのは関数の名前だけです",
+                               "関数を値として扱うことは v1 では対応していません")
 
             call: ast.Node = ast.new_node(ast.ND_CALL, n.tok)
             call.name = n.name
@@ -349,7 +404,11 @@ class Parser:
 
         # ★ 比較の連鎖を禁止する（構文の段階で捕まえる）
         if self.compare_op(self.peek()) >= 0:
-            self.fail(self.peek(), "比較演算子を連鎖させることはできません")
+            diag.error_full(self.peek(), "比較演算子を連鎖させることはできません",
+                            "2 つ目の比較演算子です",
+                            t, "1 つ目の比較演算子はここです",
+                            "Python と違い連鎖比較は使えません。'and' で繋いでください" +
+                            "（例: a < b and b < c）")
 
         return ast.new_binop_node(t, cop, lhs, rhs)
 
@@ -395,7 +454,9 @@ class Parser:
         tr: ast.Node = self.type_ref("型注釈には型名を書きます（例: x: int = 0）")
 
         if not self.peek().is_punct("="):
-            self.fail(self.peek(), "変数宣言には初期化式が必要です")
+            self.fail_full(self.peek(), "変数宣言には初期化式が必要です",
+                           "ここに '= 初期値' が必要です",
+                           "Mython では未初期化の変数を作れません（例: x: int = 0）")
         self.advance()   # "="
 
         n: ast.Node = ast.new_node(ast.ND_VARDECL, name_tok)
@@ -516,13 +577,17 @@ class Parser:
             # 式文になれるのは呼び出しだけ
             # ⚠️ 位置は「左辺のトークン」（C 版と揃える）
             if lhs.kind != ast.ND_CALL and lhs.kind != ast.ND_METHOD:
-                self.fail(self.tok_of(lhs), "この式は文として書けません")
+                self.fail_full(self.tok_of(lhs), "この式は文として書けません",
+                               "計算した値がどこにも使われていません",
+                               "結果を変数に代入するか、関数の呼び出しを書いてください")
             return lhs
 
         # ここから代入。左辺が代入先になれるか確認する
         if (lhs.kind != ast.ND_VAR and lhs.kind != ast.ND_INDEX and
                 lhs.kind != ast.ND_FIELD):
-            self.fail(self.tok_of(lhs), "この式には代入できません")
+            self.fail_full(self.tok_of(lhs), "この式には代入できません",
+                           "代入先にできるのは変数・添字 xs[i]・フィールド t.f だけです",
+                           "計算結果を代入したい場合は、左辺に変数を書いてください")
         self.advance()   # "=" または複合代入記号
 
         rhs: ast.Node = self.expr()
@@ -539,8 +604,10 @@ class Parser:
     def block(self) -> ast.Node:
         head_tok: token.Token = self.peek()
 
-        self.expect(token.TK_NEWLINE, "改行")
-        self.expect(token.TK_INDENT, "字下げされたブロック")
+        self.expect(token.TK_NEWLINE, "改行",
+                    "':' の後は改行してブロックを字下げしてください")
+        self.expect(token.TK_INDENT, "字下げされたブロック",
+                    "':' の次の行は字下げしてください（スペース 4 個を推奨）")
 
         head: ast.Node = ast.new_node(ast.ND_BLOCK, head_tok)
         cur: ast.Node = head
@@ -550,7 +617,7 @@ class Parser:
             st: ast.Node = self.stmt()
             cur.next = st
             cur = st
-        self.expect(token.TK_DEDENT, "ブロックの終わり")
+        self.expect(token.TK_DEDENT, "ブロックの終わり", "")
 
         blk: ast.Node = ast.new_node(ast.ND_BLOCK, head_tok)
         blk.body = head.next
@@ -582,11 +649,14 @@ class Parser:
 
         var_tok: token.Token = self.peek()
         if var_tok.kind != token.TK_IDENT:
-            self.fail(var_tok, "ループ変数の名前が必要です")
+            self.fail_hint(var_tok,
+                           "for のループ変数は名前で書きます（例: for x in xs:）",
+                           "ループ変数の名前が必要です")
         self.advance()
 
         if self.consume_kw("in") is None:
-            self.fail(self.peek(), "'in' が必要です")
+            self.fail_hint(self.peek(), "for は「for 変数 in 対象:」の形で書きます",
+                           "'in' が必要です")
 
         # range(...) は特別扱い（言語仕様 5.5）
         is_range: bool = (self.peek().kind == token.TK_IDENT and
@@ -630,10 +700,15 @@ class Parser:
                     else:
                         lit = inner
                 if lit.kind != ast.ND_INT:
-                    self.fail(self.tok_of(a3), "range の増分が定数ではありません")
+                    self.fail_hint(self.tok_of(a3),
+                                   "増分は整数リテラルで書いてください" +
+                                   "（例: range(0, 10, 2)）。" +
+                                   "変数を使いたい場合は while で書けます",
+                                   "range の増分が定数ではありません")
                 step = sign * lit.ival
                 if step == 0:
-                    self.fail(self.tok_of(a3), "range の増分に 0 は使えません")
+                    self.fail_hint(self.tok_of(a3), "増分が 0 だと無限ループになります",
+                                   "range の増分に 0 は使えません")
         else:
             iter_ = self.expr()
 
@@ -734,7 +809,9 @@ class Parser:
 
         # 対応する if が無い elif / else
         if t.is_kw("elif") or t.is_kw("else"):
-            self.fail(t, "対応する if がない '" + t.text + "' です")
+            self.fail_full(t, "対応する if がない '" + t.text + "' です",
+                           "この行に対応する 'if' が見つかりません",
+                           "'elif' / 'else' は 'if' と同じ字下げの位置に書いてください")
 
         s: ast.Node = self.simple_stmt()
         self.expect_newline()
@@ -747,7 +824,7 @@ class Parser:
         if t.kind == token.TK_IDENT or t.is_kw("None"):
             self.advance()
             return t
-        self.fail(t, "型名が必要です（" + what + "）")
+        self.fail_hint(t, what, "型名が必要です")
         return t
 
     # type_ref ::= [ IDENT "." ] IDENT [ "[" type_ref "]" ] [ "|" None ]
@@ -765,8 +842,11 @@ class Parser:
             n.name = m.text
             n.tok = m
             if self.peek().is_punct("."):
-                self.fail(self.peek(),
-                          "モジュールの修飾は 1 段だけです（パッケージはありません）")
+                self.fail_hint(self.peek(),
+                               "モジュールの修飾は 1 段だけです" +
+                               "（パッケージはありません）",
+                               "'" + n.mod_name + "." + n.name +
+                               "' の後にさらに '.' は書けません")
 
         open_tok: token.Token = self.peek()
         if self.consume("[") is not None:
@@ -777,8 +857,10 @@ class Parser:
         if self.peek().is_punct("|"):
             bar: token.Token = self.advance()
             if not self.peek().is_kw("None"):
-                self.fail(self.peek(),
-                          "型の '|' の後ろに書けるのは None だけです（共用体型はありません）")
+                self.fail_hint(self.peek(),
+                               "型の '|' の後ろに書けるのは None だけです" +
+                               "（共用体型はありません）",
+                               "'| None' の形で書いてください")
             self.advance()
             n.nullable = True
             n.tok = bar
@@ -788,7 +870,8 @@ class Parser:
     def param(self, allow_self: bool) -> ast.Node:
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
-            self.fail(name_tok, "引数名が必要です")
+            self.fail_hint(name_tok, "引数は「名前: 型」の形で書きます（例: n: int）",
+                           "引数名が必要です")
         self.advance()
 
         if (allow_self and name_tok.text == "self" and
@@ -798,7 +881,8 @@ class Parser:
             return n0   # type_ref は None のまま（sema がクラスの型を入れる）
 
         if self.consume(":") is None:
-            self.fail(self.peek(), "引数名の後に ':' が必要です")
+            self.fail_hint(self.peek(), "引数には型注釈が必須です（例: n: int）",
+                           "引数名の後に ':' が必要です")
 
         tr: ast.Node = self.type_ref("引数には型注釈が必須です（例: n: int）")
 
@@ -830,7 +914,9 @@ class Parser:
 
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
-            self.fail(name_tok, "関数名が必要です")
+            self.fail_hint(name_tok,
+                           "def の後には関数名を書きます（例: def f() -> int:）",
+                           "関数名が必要です")
         self.advance()
 
         n: ast.Node = ast.new_node(ast.ND_FUNC, kw)
@@ -838,24 +924,31 @@ class Parser:
 
         open_tok: token.Token = self.peek()
         if self.consume("(") is None:
-            self.fail(open_tok, "'(' が必要です")
+            self.fail_hint(open_tok,
+                           "関数名の後には引数リストが必要です" +
+                           "（例: f() や f(n: int)）",
+                           "'(' が必要です")
 
         n.params = self.param_list(open_tok, in_class)
 
         # メソッドの第 1 引数は self でなければならない（言語仕様 5.10）
         if in_class:
             p0: ast.Node | None = n.params
+            msg: str = ("メソッド '" + n.name +
+                        "' の第 1 引数は self でなければなりません")
+            hint: str = ("Mython は self を明示的に書きます" +
+                         "（例: def show(self) -> None:）")
             if p0 is None:
-                self.fail(name_tok,
-                          "メソッド '" + n.name + "' の第 1 引数は self でなければなりません")
+                self.fail_full(name_tok, msg, "ここに self が必要です", hint)
             elif p0.name != "self":
                 # ⚠️ 位置は「第 1 引数」（C 版と揃える）
-                self.fail(self.tok_of(p0),
-                          "メソッド '" + n.name + "' の第 1 引数は self でなければなりません")
+                self.fail_full(self.tok_of(p0), msg, "ここに self が必要です", hint)
 
         # 戻り型は必須（言語仕様 3.3）
         if self.consume("->") is None:
-            self.fail(self.peek(), "'->' と戻り型が必要です")
+            self.fail_hint(self.peek(),
+                           "戻り型は省略できません。値を返さないなら -> None と書きます",
+                           "'->' と戻り型が必要です")
 
         n.type_ref = self.type_ref("戻り型には型名を書きます（例: -> int / -> None）")
 
@@ -873,7 +966,10 @@ class Parser:
         n.type_ref = self.type_ref("フィールドには型注釈が必須です（例: kind: int）")
 
         if self.peek().is_punct("="):
-            self.fail(self.peek(), "フィールドに初期値は書けません")
+            self.fail_full(self.peek(), "フィールドに初期値は書けません",
+                           "ここに '=' は書けません",
+                           "初期値は init メソッドで代入してください" +
+                           "（例: def init(self) -> None: / self.kind = 0）")
         self.expect_newline()
         return n
 
@@ -883,19 +979,23 @@ class Parser:
 
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
-            self.fail(name_tok, "クラス名が必要です")
+            self.fail_hint(name_tok,
+                           "class の後にはクラス名を書きます（例: class Token:）",
+                           "クラス名が必要です")
         self.advance()
 
         n: ast.Node = ast.new_node(ast.ND_CLASS, kw)
         n.name = name_tok.text
 
         self.expect_colon("class の宣言")
-        self.expect(token.TK_NEWLINE, "改行")
-        self.expect(token.TK_INDENT, "字下げされたクラス本体")
+        self.expect(token.TK_NEWLINE, "改行",
+                    "':' の後は改行してクラス本体を字下げしてください")
+        self.expect(token.TK_INDENT, "字下げされたクラス本体",
+                    "クラスの中身は字下げして書きます（スペース 4 個を推奨）")
 
         head: ast.Node = ast.new_node(ast.ND_BLOCK, kw)
         cur: ast.Node = head
-        saw_method: bool = False
+        first_method: ast.Node | None = None
 
         while (self.peek().kind != token.TK_DEDENT and
                self.peek().kind != token.TK_EOF):
@@ -905,20 +1005,33 @@ class Parser:
                 m: ast.Node = self.func_def(True)   # ★ True = self を書ける
                 cur.next = m
                 cur = m
-                saw_method = True
+                if first_method is None:
+                    first_method = m
                 continue
 
             if t.kind == token.TK_IDENT and self.peek_at(1).is_punct(":"):
                 # ⚠️ フィールドはメソッドより先（文法がそう決めている）
-                if saw_method:
-                    self.fail(t, "フィールドはメソッドより前に書いてください")
+                if first_method is not None:
+                    diag.error_full(t, "フィールドはメソッドより前に書いてください",
+                                    "このフィールド宣言がメソッドより後ろにあります",
+                                    self.tok_of(first_method),
+                                    "最初のメソッドはここです",
+                                    "クラス本体は「フィールドを全部 → メソッドを全部」" +
+                                    "の順です（文法定義 3 節）")
                 f: ast.Node = self.field_decl()
                 cur.next = f
                 cur = f
                 continue
 
-            self.fail(t, "クラスの中に書けるのはフィールドとメソッドだけです")
-        self.expect(token.TK_DEDENT, "クラス本体の終わり")
+            self.fail_full(t, "クラスの中に書けるのはフィールドとメソッドだけです",
+                           "ここには書けません",
+                           "フィールドは「名前: 型」、メソッドは 'def' で始めます:\n" +
+                           "             class Token:\n" +
+                           "                 kind: int\n" +
+                           "\n" +
+                           "                 def show(self) -> None:\n" +
+                           "                     print(self.kind)")
+        self.expect(token.TK_DEDENT, "クラス本体の終わり", "")
 
         n.body = head.next
         return n
@@ -930,22 +1043,28 @@ class Parser:
         self.advance()   # "extern"
 
         if not self.peek().is_kw("def"):
-            self.fail(self.peek(), "extern の後に def が必要です")
+            self.fail_hint(self.peek(),
+                           "extern の後には def を書きます" +
+                           "（例: extern def my_system(cmd: str) -> int）",
+                           "extern の後に def が必要です")
         self.advance()   # "def"
 
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
-            self.fail(name_tok, "関数名が必要です")
+            self.fail_hint(name_tok, "extern def の後には C の関数名を書きます",
+                           "関数名が必要です")
         self.advance()
 
         open_tok: token.Token = self.peek()
         if self.consume("(") is None:
-            self.fail(self.peek(), "'(' が必要です")
+            self.fail_hint(self.peek(), "引数リストを書いてください（例: (path: str)）",
+                           "'(' が必要です")
 
         params: ast.Node | None = self.param_list(open_tok, False)
 
         if self.consume("->") is None:
-            self.fail(self.peek(), "'->' が必要です")
+            self.fail_hint(self.peek(), "戻り型を書いてください（例: -> int）",
+                           "'->' が必要です")
 
         n: ast.Node = ast.new_node(ast.ND_FUNC, name_tok)
         n.name = name_tok.text
@@ -954,7 +1073,9 @@ class Parser:
 
         # ⚠️ 本体は読まない
         if self.peek().is_punct(":"):
-            self.fail(self.peek(), "extern def に ':' は書けません")
+            self.fail_hint(self.peek(),
+                           "extern 宣言は本体を持ちません（改行で終わります）",
+                           "extern def に ':' は書けません")
         self.expect_newline()
 
         return n   # body は None のまま（★ extern の印）
@@ -965,11 +1086,16 @@ class Parser:
 
         name_tok: token.Token = self.peek()
         if name_tok.kind != token.TK_IDENT:
-            self.fail(name_tok, "モジュール名が必要です")
+            self.fail_hint(name_tok,
+                           "import の後にはモジュール名を書きます（例: import lexer）",
+                           "モジュール名が必要です")
         self.advance()
 
         if self.peek().is_punct("."):
-            self.fail(self.peek(), "モジュール名にドットは使えません")
+            self.fail_hint(self.peek(),
+                           "モジュール名にドットは使えません" +
+                           "（パッケージはありません）",
+                           "'" + name_tok.text + "' の後に '.' は書けません")
 
         n: ast.Node = ast.new_node(ast.ND_IMPORT, kw)
         n.name = name_tok.text
@@ -986,7 +1112,10 @@ class Parser:
             t: token.Token = self.peek()
 
             if t.kind == token.TK_INDENT:
-                self.fail(t, "予期しないインデントです")
+                self.fail_full(t, "予期しないインデントです",
+                               "この行が余分に字下げされています",
+                               "トップレベルに書けるのは def / class / import / " +
+                               "extern とグローバル変数だけです（言語仕様 6.3）")
             if t.kind == token.TK_DEDENT:
                 panic("parser: unexpected DEDENT")
 
@@ -1022,7 +1151,13 @@ class Parser:
                 self.expect_newline()
                 continue
 
-            self.fail(t, "トップレベルに実行文は書けません")
+            self.fail_full(t, "トップレベルに実行文は書けません",
+                           "ここに書けるのは def / class / import / extern と" +
+                           "グローバル変数だけです",
+                           "処理は main の中に書いてください:\n" +
+                           "             def main() -> int:\n" +
+                           "                 ...\n" +
+                           "                 return 0")
 
         blk: ast.Node = ast.new_node(ast.ND_BLOCK, first)
         blk.body = head.next

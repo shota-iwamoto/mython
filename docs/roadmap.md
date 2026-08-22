@@ -219,8 +219,16 @@ C 版（stage0）が正解を持っているので、常に出力を比較しな
   第15章の `T | None` が無ければ書けない章だった
 - [→ 第17章](chapters/ch17-selfhost-parser.md)
 
-### ⬜ 第18章 Mython で型検査器を書く
-- 成果物: `selfhost/sema.my`
+### ✅ 第18章 Mython で型検査器を書く
+- 成果物: `selfhost/diag.my`（295 行）/ `types.my` / `module.my` / **`sema.my`（1949 行）**、
+  C 版の `--check`、`lib` の `eprint` / `getenv`
+- 検証: **型エラー 136 件のメッセージが 1 バイトも違わず一致**、
+  正常系 173 件がどちらも素通り
+- 注記: 循環 import を禁止した代償が出た章。C 版で 3 ファイルに分かれていた
+  Type / Class / シンボル表を、依存が一方通行になるように置き直した
+  （`Class.owner` は参照ではなく**モジュール名**で持つ）。
+  **C 版のバグを 1 件発見**（`entry` という変数名が LLVM のラベルと衝突。第1章から）
+- [→ 第18章](chapters/ch18-selfhost-sema.md)
 
 ### ⬜ 第19章 Mython でコード生成器を書く
 - 成果物: `selfhost/codegen.my`

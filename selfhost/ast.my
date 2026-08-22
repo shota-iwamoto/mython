@@ -9,6 +9,193 @@
 import strings
 import token
 
+# ── 型の種類（C 版 TypeKind と同じ順序・同じ値）──
+TY_INT: int = 0
+TY_BOOL: int = 1
+TY_NONE: int = 2
+TY_STR: int = 3
+TY_LIST: int = 4
+TY_CLASS: int = 5
+TY_OPT: int = 6      # T | None（第15章）
+TY_NULL: int = 7     # None リテラルの型（変数の型にはならない）
+
+
+class Type:
+    kind: int
+    elem: Type | None     # list[T] の要素型 / T | None の中身
+    name: str             # クラス名（エラーメッセージ用）
+    cls: Class | None     # 定義への参照。★ 型の同一性はこれで判定する
+    opt: Type | None      # この型の「T | None」版（1 個だけ作る）
+
+    def init(self, kind: int) -> None:
+        self.kind = kind
+        self.name = ""
+
+
+class Field:
+    name: str
+    type: Type | None
+    index: int    # 構造体の何番目か（getelementptr に渡す）
+    offset: int   # 先頭から何バイト目か（説明とデバッグ用）
+    tok: token.Token | None
+    next: Field | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.tok = tok
+        self.index = 0
+        self.offset = 0
+
+
+class Class:
+    name: str
+    ir_name: str          # IR 上の修飾名（"lexer.Token"）
+    tok: token.Token | None
+    fields: Field | None  # 宣言順
+    nfields: int
+    size: int
+    align: int
+    type: Type | None
+    node: Node | None           # ND_CLASS（メソッドをたどるため）
+    has_init: bool
+    owner_name: str   # 定義されているモジュール名（第13章）
+    next: Class | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.tok = tok
+        self.ir_name = ""
+        self.owner_name = ""
+        self.nfields = 0
+        self.size = 0
+        self.align = 0
+        self.has_init = False
+
+
+# ── プリミティブ型のシングルトン ────────────────────────────
+#
+# ⚠️ Mython のグローバル変数の初期化式はコンパイル時定数だけなので、
+#   C 版のように起動時の関数（types_init）で作ることができません。
+#   代わりに「1 個だけ作って持ち回る」入れ物を用意します。
+class Prims:
+    int_: Type | None
+    bool_: Type | None
+    none_: Type | None
+    str_: Type | None
+    null_: Type | None
+
+    def init(self) -> None:
+        self.int_ = Type(TY_INT)
+        self.bool_ = Type(TY_BOOL)
+        self.none_ = Type(TY_NONE)
+        self.str_ = Type(TY_STR)
+        self.null_ = Type(TY_NULL)
+
+
+def type_list(elem: Type | None) -> Type:
+    t: Type = Type(TY_LIST)
+    t.elem = elem
+    return t
+
+def type_class(name: str, c: Class | None) -> Type:
+    t: Type = Type(TY_CLASS)
+    t.name = name
+    t.cls = c
+    return t
+
+# nullable にできる型か（参照型だけ）
+def type_can_be_opt(t: Type) -> bool:
+    return t.kind == TY_STR or t.kind == TY_LIST or t.kind == TY_CLASS
+
+def type_opt(elem: Type) -> Type:
+    if elem.kind == TY_OPT:
+        return elem
+    cached: Type | None = elem.opt
+    if cached is not None:
+        return cached
+    t: Type = Type(TY_OPT)
+    t.elem = elem
+    elem.opt = t
+    return t
+
+def elem_of(t: Type) -> Type:
+    e: Type | None = t.elem
+    if e is None:
+        panic("types: 要素型がありません")
+        return t
+    else:
+        return e
+
+# 2 つの型が同じか（C 版 type_equal）
+#
+# ★ クラスの == は参照（アドレス）の比較です（第12章）。C 版の
+#   `if (a == b) return true;`（ポインタ比較）がそのまま書けます。
+def type_equal(a: Type, b: Type) -> bool:
+    if a == b:
+        return True
+    if a.kind != b.kind:
+        return False
+    if a.kind == TY_LIST:
+        return type_equal(elem_of(a), elem_of(b))
+    if a.kind == TY_CLASS:
+        return same_class(a, b)
+    if a.kind == TY_OPT:
+        return type_equal(elem_of(a), elem_of(b))
+    return True
+
+# ★ クラスは「同じ定義か」で比べる（名前の一致ではない）
+def same_class(a: Type, b: Type) -> bool:
+    ca: Class | None = a.cls
+    cb: Class | None = b.cls
+    # ⚠️ 'or' では絞り込みが効かないので、ガード節を 2 本に分けます（15.5 節）
+    if ca is None:
+        return False
+    if cb is None:
+        return False
+    return ca == cb
+
+# 代入互換性（C 版 type_assignable）
+def type_assignable(from_: Type, to: Type) -> bool:
+    if type_equal(from_, to):
+        return True
+    if to.kind != TY_OPT:
+        return False
+    if from_.kind == TY_NULL:
+        return True
+    return type_assignable(from_, elem_of(to))
+
+def type_name(t: Type) -> str:
+    if t.kind == TY_INT:
+        return "int"
+    if t.kind == TY_BOOL:
+        return "bool"
+    if t.kind == TY_NONE:
+        return "None"
+    if t.kind == TY_STR:
+        return "str"
+    if t.kind == TY_LIST:
+        return "list[" + type_name(elem_of(t)) + "]"
+    if t.kind == TY_CLASS:
+        return t.name
+    if t.kind == TY_OPT:
+        return type_name(elem_of(t)) + " | None"
+    if t.kind == TY_NULL:
+        return "None"
+    panic("types.type_name: unknown kind")
+    return ""
+
+def type_size(t: Type) -> int:
+    if t.kind == TY_BOOL:
+        return 1
+    return 8
+
+def type_align(t: Type) -> int:
+    return type_size(t)
+
+def type_name_list() -> str:
+    return "int, bool, str, None, list[T], T | None"
+
+
 # ── ノードの種類（C 版 NodeKind と同じ順序・同じ値）──
 ND_INT: int = 0
 ND_BOOL: int = 1
@@ -152,6 +339,25 @@ class Node:
     # 型注釈のモジュール修飾（ND_TYPEREF。第13章）
     mod_name: str
 
+    # ★ この式の型。意味解析パス（sema.my）が埋めます。
+    #   構文解析の直後は必ず None です。
+    type: Type | None
+
+    # LLVM 上の名前（sema が割り当てる。第7章〜）
+    ir_name: str
+
+    # 参照先が別のモジュールにあるか（第13章）
+    is_extern: bool
+    is_global: bool
+
+    # sema が解決した記録（第9・12章）
+    #
+    # ★ C 版は Builtin 表へのポインタを持ちますが、Mython 版は
+    #   「呼ぶランタイム関数の名前」を持ちます（codegen が使うのはそれだけ）。
+    builtin: str
+    cls: Class | None
+    field: Field | None
+
     # ── 子ノード ──
     lhs: Node | None
     rhs: Node | None
@@ -175,6 +381,10 @@ class Node:
         self.name = ""
         self.nullable = False
         self.mod_name = ""
+        self.ir_name = ""
+        self.builtin = ""
+        self.is_extern = False
+        self.is_global = False
 
 
 # ── コンストラクタ（C 版の new_*_node と同じ形）──────────────

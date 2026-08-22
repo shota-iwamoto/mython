@@ -51,6 +51,12 @@ void *my_check_not_none(void *p) {
 
 void my_print_int(long long v) { printf("%lld\n", v); }
 
+// stderr にそのまま書く（改行は付けない）。第18章。
+//
+// ★ コンパイラは診断を stderr に書きます。print は stdout なので、
+//   セルフホストの診断にはこれが要ります（移植で見つかった穴）。
+void my_eprint(const char *s) { fputs(s, stderr); }
+
 void my_print_str(const char *s) { printf("%s\n", s); }
 
 void my_print_bool(long long v) { printf("%s\n", v ? "True" : "False"); }
@@ -240,6 +246,17 @@ void my_set_args(long long argc, char **argv) {
 // ⚠️ system() が返すのは「終了コード」ではなく wait(2) の状態値です。
 //    そのまま返すと exit 3 が 768（3 << 8）に見えて驚くので、
 //    ここで終了コードに直します。境界の食い違いはランタイムで吸収します。
+// 環境変数を読む（無ければ空文字列）。第18章。
+//
+// ★ stage1 が標準ライブラリの場所を知るために使います。C 版はビルド時に
+//   埋め込みますが（-DMYTHON_LIB_DIR）、Mython にプリプロセッサは無いので
+//   実行時に読みます。C 版も同じ環境変数を見るようにして、挙動を揃えます。
+char *my_getenv(const char *name) {
+    const char *v = getenv(name);
+    if (!v) return my_str_from_cstr("");
+    return my_str_from_cstr(v);
+}
+
 long long my_system(const char *cmd) {
     int st = system(cmd);
     if (st == -1) return -1;

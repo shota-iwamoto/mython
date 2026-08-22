@@ -1,6 +1,6 @@
 # selfhost/ — Mython 製の Mython コンパイラ (stage1)
 
-**第16章から書き始めました。** 現在は構文解析器まで（`token.my` / `lexer.my` / `ast.my` / `parser.my`）。
+**第16章から書き始めました。** 現在は型検査器まで（字句解析・構文解析・意味解析）。
 
 `src/` の C 版と **1:1 で対応**させます。この対応を崩さないでください。
 崩すと「C 版のどこを見れば正解がわかるか」が失われます。
@@ -11,7 +11,10 @@
 | `src/lexer.c` | `selfhost/lexer.my` | 第16章 ✅ |
 | `src/parser.c` | `selfhost/parser.my` | 第17章 ✅ |
 | `src/ast.c` | `selfhost/ast.my` | 第17章 ✅ |
-| `src/sema.c` | `selfhost/sema.my` | 第18章 |
+| `src/sema.c` | `selfhost/sema.my` | 第18章 ✅ |
+| `src/diag.c` | `selfhost/diag.my` | 第18章 ✅ |
+| `src/types.c` | `selfhost/ast.my` に同居 | 第18章 ✅ |
+| `src/module.c` | `selfhost/module.my` | 第18章 ✅ |
 | `src/codegen.c` | `selfhost/codegen.my` | 第19章 |
 | `src/main.c` | `selfhost/main.my` | 第20章 |
 
@@ -32,6 +35,11 @@ diff /tmp/c.txt /tmp/m.txt
 # 第17章：AST（S 式）が一致するか
 ./build/mythonc --dump-ast tests/cases/x.my > /tmp/c.txt
 ./build/stage1-ast         tests/cases/x.my > /tmp/m.txt
+diff /tmp/c.txt /tmp/m.txt
+
+# 第18章：型検査の診断が一致するか（メッセージ全文）
+./build/mythonc --check tests/cases/x.my 2> /tmp/c.txt
+./build/stage1-check    tests/cases/x.my 2> /tmp/m.txt
 diff /tmp/c.txt /tmp/m.txt
 
 # 第20章：不動点の検証

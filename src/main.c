@@ -39,6 +39,7 @@ static void usage(int status) {
             "  --dump-tokens   トークン列を表示して終了（字句解析のデバッグ用）\n"
             "  --dump-ast      AST を S 式で表示して終了（構文解析のデバッグ用）\n"
             "  --keep-ll       実行ファイル生成後も .ll を残す\n"
+            "  --check         型検査までで止める（エラーが無ければ何も出さない）\n"
             "  -O0|-O1|-O2|-O3 clang に渡す最適化レベル（既定: -O0）\n"
             "  -h, --help      この使い方を表示\n");
     exit(status);
@@ -50,6 +51,7 @@ typedef enum {
     STAGE_DUMP_TOKENS,  // 字句解析まで
     STAGE_DUMP_AST,     // 構文解析まで
     STAGE_EMIT_IR,      // コード生成まで（-S）
+    STAGE_CHECK,        // 意味解析まで（--check。第18章）
 } Stage;
 
 typedef struct {
@@ -80,6 +82,9 @@ static Options parse_args(int argc, char **argv) {
         if (strcmp(a, "--dump-tokens") == 0) { o.stage = STAGE_DUMP_TOKENS; continue; }
         if (strcmp(a, "--dump-ast") == 0) { o.stage = STAGE_DUMP_AST; continue; }
         if (strcmp(a, "--keep-ll") == 0) { o.keep_ll = 1; continue; }
+        // ★ 第18章：型検査までで止める。stage1（Mython 版）と
+        //   「エラーが出るか / 出ないか」を突き合わせるために使います。
+        if (strcmp(a, "--check") == 0) { o.stage = STAGE_CHECK; continue; }
 
         if (strcmp(a, "-O0") == 0 || strcmp(a, "-O1") == 0 ||
             strcmp(a, "-O2") == 0 || strcmp(a, "-O3") == 0) {
@@ -137,6 +142,9 @@ int main(int argc, char **argv) {
 
     // ── ③ 意味解析・型検査（全モジュールまとめて）──
     sema_program(mods, entry);
+
+    // --check : ここで終わり（エラーがあれば sema が既に終了している）
+    if (opt.stage == STAGE_CHECK) return 0;
 
     // 入口モジュールの main の IR 名（@main のラッパが呼ぶ相手）
     StrBuf main_ir;

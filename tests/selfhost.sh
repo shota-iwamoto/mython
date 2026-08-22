@@ -14,9 +14,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MYTHONC="$ROOT/build/mythonc"
 STAGE1="$ROOT/build/stage1-lexer"
 STAGE1_AST="$ROOT/build/stage1-ast"
+STAGE1_CHECK="$ROOT/build/stage1-check"
 TMP="$ROOT/tests/tmp"
 
 mkdir -p "$TMP"
+
+# ★ 標準ライブラリの場所を両者に同じ形で渡す（C 版も stage1 も
+#   MYTHON_LIB_DIR を先に見ます。ch18 18.6 節）
+export MYTHON_LIB_DIR="$ROOT/lib"
 
 if [ ! -x "$MYTHONC" ]; then
     echo "コンパイラが見つかりません: $MYTHONC（先に make）"
@@ -31,6 +36,11 @@ if ! "$MYTHONC" "$ROOT/selfhost/dump_tokens.my" -o "$STAGE1" > "$TMP/stage1-buil
 fi
 if ! "$MYTHONC" "$ROOT/selfhost/dump_ast.my" -o "$STAGE1_AST" > "$TMP/stage1-build.log" 2>&1; then
     echo "stage1-ast のビルドに失敗しました:"
+    cat "$TMP/stage1-build.log"
+    exit 1
+fi
+if ! "$MYTHONC" "$ROOT/selfhost/check.my" -o "$STAGE1_CHECK" > "$TMP/stage1-build.log" 2>&1; then
+    echo "stage1-check のビルドに失敗しました:"
     cat "$TMP/stage1-build.log"
     exit 1
 fi
@@ -50,7 +60,7 @@ else
     C_OK=''; C_NG=''; C_DIM=''; C_END=''
 fi
 
-pass=0; errpass=0; astpass=0; asterrpass=0; fail=0
+pass=0; errpass=0; astpass=0; asterrpass=0; chkpass=0; chkerrpass=0; fail=0
 failed_names=()
 
 for f in "${FILES[@]}"; do
@@ -59,16 +69,15 @@ for f in "${FILES[@]}"; do
     # ⚠️ わざと壊してあるケースは C 版の字句解析が失敗する。
     #   トークン列は比べられないが、**エラーの位置**は比べられる。
     if ! "$MYTHONC" --dump-tokens "$f" > "$TMP/c.tokens" 2>"$TMP/c.err"; then
-        cpos="$(grep -oE '[^ ]+\.my:[0-9]+:[0-9]+' "$TMP/c.err" | head -1)"
+        # ★ 第18章：diag を移植したので、**メッセージ全体**を比べます
         "$STAGE1" "$f" > /dev/null 2>"$TMP/m.err"
-        mpos="$(grep -oE '[^ ]+\.my:[0-9]+:[0-9]+' "$TMP/m.err" | head -1)"
 
-        if [ -n "$cpos" ] && [ "$cpos" = "$mpos" ]; then
+        if diff -q "$TMP/c.err" "$TMP/m.err" > /dev/null; then
             errpass=$((errpass + 1))
         else
             fail=$((fail + 1)); failed_names+=("$name")
-            printf "  %sFAIL%s  %s（字句エラーの位置が違う）\n" "$C_NG" "$C_END" "$name"
-            printf "          C 版: %s\n          stage1: %s\n" "$cpos" "$mpos"
+            printf "  %sFAIL%s  %s（字句エラーの内容が違う）\n" "$C_NG" "$C_END" "$name"
+            diff "$TMP/c.err" "$TMP/m.err" | head -12 | sed 's/^/          /'
         fi
         continue
     fi
@@ -93,16 +102,15 @@ for f in "${FILES[@]}"; do
     #
     # ⚠️ 構文エラーのファイルは S 式を比べられない。位置だけ比べる。
     if ! "$MYTHONC" --dump-ast "$f" > "$TMP/c.ast" 2>"$TMP/c.err"; then
-        cpos="$(grep -oE '[^ ]+\.my:[0-9]+:[0-9]+' "$TMP/c.err" | head -1)"
+        # ★ 第18章：構文エラーもメッセージ全体で比べます
         "$STAGE1_AST" "$f" > /dev/null 2>"$TMP/m.err"
-        mpos="$(grep -oE '[^ ]+\.my:[0-9]+:[0-9]+' "$TMP/m.err" | head -1)"
 
-        if [ -n "$cpos" ] && [ "$cpos" = "$mpos" ]; then
+        if diff -q "$TMP/c.err" "$TMP/m.err" > /dev/null; then
             asterrpass=$((asterrpass + 1))
         else
             fail=$((fail + 1)); failed_names+=("$name")
-            printf "  %sFAIL%s  %s（構文エラーの位置が違う）\n" "$C_NG" "$C_END" "$name"
-            printf "          C 版: %s\n          stage1: %s\n" "$cpos" "$mpos"
+            printf "  %sFAIL%s  %s（構文エラーの内容が違う）\n" "$C_NG" "$C_END" "$name"
+            diff "$TMP/c.err" "$TMP/m.err" | head -14 | sed 's/^/          /'
         fi
         continue
     fi
@@ -120,16 +128,49 @@ for f in "${FILES[@]}"; do
         fail=$((fail + 1)); failed_names+=("$name")
         printf "  %sFAIL%s  %s（AST）\n" "$C_NG" "$C_END" "$name"
         diff "$TMP/c.ast" "$TMP/m.ast" | head -12 | sed 's/^/          /'
+        continue
+    fi
+
+    # ── ③ 型検査（第18章）──
+    #
+    # ★ エラーが「出る / 出ない」だけでなく、メッセージ全体を比べます。
+    #   ⚠️ import を含むファイルは入口として型検査できないもの（main が無い
+    #     ライブラリなど）があるので、C 版がエラーにするかどうかで揃えます。
+    "$MYTHONC" --check "$f" > /dev/null 2>"$TMP/c.err"; crc=$?
+    "$STAGE1_CHECK" "$f" > /dev/null 2>"$TMP/m.err"; mrc=$?
+
+    if [ "$crc" -ne "$mrc" ]; then
+        fail=$((fail + 1)); failed_names+=("$name")
+        printf "  %sFAIL%s  %s（型検査の成否が違う: C=%d stage1=%d）\n" \
+               "$C_NG" "$C_END" "$name" "$crc" "$mrc"
+        head -6 "$TMP/c.err" | sed 's/^/          C : /'
+        head -6 "$TMP/m.err" | sed 's/^/          M : /'
+        continue
+    fi
+
+    if ! diff -q "$TMP/c.err" "$TMP/m.err" > /dev/null; then
+        fail=$((fail + 1)); failed_names+=("$name")
+        printf "  %sFAIL%s  %s（型エラーの内容が違う）\n" "$C_NG" "$C_END" "$name"
+        diff "$TMP/c.err" "$TMP/m.err" | head -14 | sed 's/^/          /'
+        continue
+    fi
+
+    if [ "$crc" -eq 0 ]; then
+        chkpass=$((chkpass + 1))
+    else
+        chkerrpass=$((chkerrpass + 1))
     fi
 done
 
 echo
 echo "────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
-    printf "%sトークン列一致 %d 件 / 字句エラーの位置一致 %d 件%s\n" \
+    printf "%sトークン列一致 %d 件 / 字句エラーの内容一致 %d 件%s\n" \
            "$C_OK" "$pass" "$errpass" "$C_END"
-    printf "%sAST 一致 %d 件 / 構文エラーの位置一致 %d 件%s\n" \
+    printf "%sAST 一致 %d 件 / 構文エラーの内容一致 %d 件%s\n" \
            "$C_OK" "$astpass" "$asterrpass" "$C_END"
+    printf "%s型検査 一致 %d 件 / 型エラーの内容一致 %d 件%s\n" \
+           "$C_OK" "$chkpass" "$chkerrpass" "$C_END"
     exit 0
 else
     printf "%s%d 件一致 / %d 件不一致%s\n" "$C_NG" "$pass" "$fail" "$C_END"

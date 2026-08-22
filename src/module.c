@@ -2,6 +2,7 @@
 #include "module.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "diag.h"
@@ -99,9 +100,19 @@ static char *join_path(const char *dir, const char *name) {
 // ★ 優先順位は決めません。両方にあったらエラーにします。
 //   どちらを先にしても「黙って隠れる」ものが出るからです（14.4 節）。
 //   曖昧さは、解決規則を作るより起こせなくするほうが小さく済みます。
+// 標準ライブラリの場所。
+// ★ 第18章：環境変数 MYTHON_LIB_DIR があればそちらを使います。
+//   stage1（Mython 版）にはプリプロセッサが無く、ビルド時に埋め込めないので、
+//   **両方が同じ規則で探す**ようにするためです。
+static const char *lib_dir(void) {
+    const char *env = getenv("MYTHON_LIB_DIR");
+    if (env && env[0]) return env;
+    return MYTHON_LIB_DIR;
+}
+
 static char *path_for(Loader *ld, const char *name, Token *from) {
     char *user = join_path(ld->dir, name);
-    char *lib = join_path(MYTHON_LIB_DIR, name);
+    char *lib = join_path(lib_dir(), name);
 
     bool has_user = file_exists(user);
     bool has_lib = file_exists(lib);

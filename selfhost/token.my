@@ -46,14 +46,15 @@ class Token:
     # ── 位置情報（エラー報告に使う。全トークンが必ず持つ）──
     file: str
     line: int
-    col: int    # 行頭からのバイト数（1 起算）。C 版の Token.col と同じ
+    col: int         # 行頭からのバイト数（1 起算）。C 版の Token.col と同じ
 
-    # 表示用の桁（行頭からの文字数）。
-    #
-    # ⚠️ C 版は Token に持たせず、診断を描画するとき（src/diag.c）に
-    #   バイト数から文字数へ直しています。stage1 にはまだ diag が無いので、
-    #   字句解析器が計算して持ちます。**第18章で C 版と同じ形に直します。**
-    dcol: int
+    # ★ 第18章：C 版と同じ形に戻しました。
+    #   C 版の Token は `const char *line_start`（ソースを指すポインタ）を
+    #   持ちます。Mython にポインタは無いので「ソースそのもの + 行頭の添字」で
+    #   同じことを表します。str は参照なので、複製は起きません。
+    src: str         # このトークンが属するソース全体
+    line_start: int  # 行頭のバイト位置
+    len: int         # トークンのバイト長（下線の長さに使う）
 
     # ── ソース上の実体 ──
     #
@@ -64,12 +65,15 @@ class Token:
     ival: int  # TK_INT の値
     slen: int  # text のバイト長
 
-    def init(self, kind: int, file: str, line: int, col: int, dcol: int) -> None:
+    def init(self, kind: int, file: str, line: int, col: int, src: str,
+             line_start: int, length: int) -> None:
         self.kind = kind
         self.file = file
         self.line = line
         self.col = col
-        self.dcol = dcol
+        self.src = src
+        self.line_start = line_start
+        self.len = length
         self.raw = ""
         self.text = ""
         self.ival = 0

@@ -238,6 +238,17 @@ static VarEntry *lookup(Sema *s, const char *name) {
 //   parser はスコープを知らず、codegen は宣言と参照を結びつける情報を
 //   持っていません。シンボルテーブルを持つ sema だけが両方できます。
 static bool name_used(Sema *s, const char *name) {
+    // ⚠️ "entry" は予約する（第18章）。
+    //
+    //   LLVM ではラベルとローカル値が同じ名前空間にいます。関数の先頭は
+    //   慣習的に `entry:` なので、利用者が `entry` という変数を書くと
+    //   `%entry = alloca` と衝突して IR が壊れます（stage1 の移植で踏んだ）。
+    //
+    //   ★ コンパイラが作る名前は '.' を含めて衝突を避ける約束ですが
+    //     （%t.0 / if.then.0 / for.ix.0）、`entry` だけは慣習を優先して
+    //     '.' を入れていません。その代わりここで予約します。
+    if (strcmp(name, "entry") == 0) return true;
+
     for (UsedName *u = s->used; u; u = u->next)
         if (strcmp(u->name, name) == 0) return true;
     return false;

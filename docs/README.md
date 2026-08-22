@@ -63,7 +63,7 @@
 | [第15章](chapters/ch15-nullable.md) | セルフホスト準備（T \| None と棚卸し） | ✅ 完成 |
 | [第16章](chapters/ch16-selfhost-lexer.md) | Mython で字句解析器を書く | ✅ 完成 |
 | [第17章](chapters/ch17-selfhost-parser.md) | Mython で構文解析器を書く | ✅ 完成 |
-| 第18章 | Mython で型検査器を書く | ⬜ 未着手 |
+| [第18章](chapters/ch18-selfhost-sema.md) | Mython で型検査器を書く | ✅ 完成 |
 | 第19章 | Mython でコード生成器を書く | ⬜ 未着手 |
 | 第20章 | ブートストラップと不動点検証 | ⬜ 未着手 |
 

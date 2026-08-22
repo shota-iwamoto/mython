@@ -1,0 +1,80 @@
+# types.my — シンボル表（第18章）
+#
+# ★ C 版の src/sema.c 前半（FuncSig / VarEntry / Scope / ModuleSyms）にあたります。
+#
+# ⚠️ Type / Class / Field は **ast.my** に置きました。C 版では types.h と ast.h に
+#   分かれていますが、Mython は**循環 import を禁止している**ため
+#   （第13章の判断 150）、Node ↔ Type ↔ Class を相互に参照させるには
+#   同じモジュールに置くしかありません。
+#
+#   さらに Class は「定義されたモジュール」を指す必要がありますが、
+#   ModuleSyms はこちら側にあるので、**モジュール名（str）で持ちます**。
+#   ポインタの代わりに名前で引く——これも循環を切るための形です。
+#
+#   ★ 「言語の制限が設計を決めた」例です（ch18 18.3 節）。
+import strings
+import ast
+import module
+import token
+
+# 関数のシグネチャ表（第8章）
+class FuncSig:
+    name: str        # 表を引く鍵（"add" / "Token.show"）
+    ir_name: str     # IR 上の名前（"lexer.add" / "lexer.Token.show"）
+    ret: ast.Type | None
+    params: list[ast.Type]
+    pnames: list[str]
+    nparams: int
+    tok: token.Token | None
+    owner: ModuleSyms | None
+    next: FuncSig | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.ir_name = ""
+        self.nparams = 0
+        self.params = []
+        self.pnames = []
+        self.tok = tok
+
+
+class VarEntry:
+    name: str
+    ir_name: str     # LLVM 上の名前（記号 % / @ まで含む）
+    is_global: bool
+
+    # ★ 第15章：型が 2 つ（宣言された型と、絞り込まれた今の型）
+    declared: ast.Type | None
+    type: ast.Type | None
+
+    decl_tok: token.Token | None
+    next: VarEntry | None
+
+    def init(self, name: str, tok: token.Token | None) -> None:
+        self.name = name
+        self.ir_name = ""
+        self.is_global = False
+        self.decl_tok = tok
+
+
+class Scope:
+    parent: Scope | None
+    vars: VarEntry | None
+
+    def init(self, parent: Scope | None) -> None:
+        self.parent = parent
+
+
+# モジュールごとのシンボル表（第13章）
+class ModuleSyms:
+    mod: module.Module | None
+    funcs: FuncSig | None
+    classes: ast.Class | None
+    globals: Scope | None
+    next: ModuleSyms | None
+
+    def init(self, mod: module.Module | None) -> None:
+        self.mod = mod
+        self.globals = Scope(None)
+
+
