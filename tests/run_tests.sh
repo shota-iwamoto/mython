@@ -28,7 +28,11 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MYTHONC="$ROOT/build/mythonc"
+
+# ★ 第20章：使うコンパイラを差し替えられるようにする。
+#   MYTHONC=build/stage2 tests/run_tests.sh とすれば、
+#   **Mython 製コンパイラでテスト全部を通す**ことができます。
+MYTHONC="${MYTHONC:-$ROOT/build/mythonc}"
 TMP="$ROOT/tests/tmp"
 
 if [ ! -x "$MYTHONC" ]; then

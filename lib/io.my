@@ -9,6 +9,7 @@ extern def my_write_file(path: str, text: str) -> None
 extern def my_file_exists(path: str) -> int
 extern def my_eprint(s: str) -> None
 extern def my_print_raw(s: str) -> None
+extern def my_remove(path: str) -> None
 
 # ファイル全体を読む（開けなければ実行時エラーで終了する）
 def read_file(path: str) -> str:
@@ -19,6 +20,10 @@ def write_file(path: str, text: str) -> None:
 
 # ⚠️ bool は extern の境界を越えられないので、int で受けてここで bool にします
 #    （docs/chapters/ch14-stdlib.md 14.2 節）。
+# ファイルを削除する（無ければ何もしない）
+def remove(path: str) -> None:
+    my_remove(path)
+
 # 標準出力に「そのまま」書く（改行を足さない）。
 # ★ print は改行を足すので、IR のような「自分で改行を持つ文字列」には使えません。
 def print_raw(s: str) -> None:

@@ -45,66 +45,91 @@ def main() -> int:
 
 ## 現在の到達状況
 
-**第4章 完了** — 複数行のプログラムを読み、インデント構造を検出します。
+**全 20 章 完了 — セルフホスト達成（2026-08-23）**
 
 ```bash
-$ make
-$ printf '2 * 3 + (10 - 4) * 6\n' > t.my
-$ ./build/mythonc t.my -o t
-$ ./t; echo $?
-42
-```
+$ make bootstrap
+── stage1 = C 版がビルド
+── stage2 = stage1 がビルド（Mython 製コンパイラが自分自身を）
+── stage3 = stage2 がビルド
 
-インデントは仮想トークンに変換されます（`--dump-tokens` で確認できます）。
+★ stage2 と stage3 が出す IR が完全一致（13 本）
+★ 実行ファイルもバイト単位で一致（UUID を除く）
+
+★ 不動点に到達しました（stage2 == stage3）
+   Mython コンパイラは、自分自身をコンパイルできます。
+```
 
 ```bash
-$ printf '1\n    2\n        3\n4\n' > t.my && ./build/mythonc --dump-tokens t.my
-  0  INT       1:1    1
-  1  NEWLINE   1:2
-  2  INDENT    2:5
-  3  INT       2:5    2
-  4  NEWLINE   2:6
-  5  INDENT    3:9
-  6  INT       3:9    3
-  7  NEWLINE   3:10
-  8  DEDENT    4:1
-  9  DEDENT    4:1        ← 2 段まとめて戻る
- 10  INT       4:1    4
- 11  NEWLINE   4:2
- 12  EOF       4:2
+$ make bootstrap-test     # Mython 製コンパイラでテストを全部通す
+全 312 件パス
 ```
 
-間違えると、こう教えてくれます。
+### 言語の機能
 
-```
-$ echo '(1 + 2' > t.my && ./build/mythonc t.my -o t
-error: 閉じ括弧 ')' がありません
-  --> t.my:1:7
-   |
- 1 | (1 + 2
-   |       ^ ここに ')' が必要です
-   |
-note: 対応する '(' はここです
-  --> t.my:1:1
-   |
- 1 | (1 + 2
-   | ^
-   |
-   = ヒント: 括弧の対応を確認してください
+```python
+import strings                       # モジュール（ch13）
+
+class Node:                          # class とメソッド（ch12）
+    v: int
+    next: Node | None                # T | None と絞り込み（ch15）
+
+    def init(self, v: int) -> None:
+        self.v = v
+
+def main() -> int:
+    a: Node = Node(1)
+    a.next = Node(2)
+
+    cur: Node | None = a
+    while cur is not None:           # 絞り込みは while にも効く
+        print(cur.v)
+        cur = cur.next               # 代入すると絞り込みは解除される
+
+    xs: list[str] = strings.split("a,b,c", ",")   # 標準ライブラリは Mython 製
+    for x in xs:                     # for は while への脱糖（ch11）
+        print(x)
+    return 0
 ```
 
 | 段階 | 状態 |
 |---|---|
-| ① 字句解析 | 整数リテラル（10/16/8/2 進）/ 記号 15 種 / コメント / 位置情報 / **仮想トークン（NEWLINE・INDENT・DEDENT）** |
-| ② 構文解析 | 再帰下降、優先順位の階層 8 段（14 種の演算子）、複数文 |
-| ③ 型検査 | 第5章で追加 |
-| ④ コード生成 | LLVM IR テキスト出力（4 バッファ方式） |
-| ⑤ 実行ファイル | clang 連携 |
-| 診断 | 位置・ラベル・関連位置（note）・ヒント / UTF-8 対応 |
+| ① 字句解析 | インデント構文（仮想トークン）・文字列・数値リテラル（10/16/8/2 進） |
+| ② 構文解析 | 再帰下降 / 優先順位 8 段 / 脱糖 3 種（`elif`・複合代入・`for`） |
+| ③ 型検査 | 静的型・型注釈必須・`T \| None` と絞り込み・モジュールごとの名前空間 |
+| ④ コード生成 | LLVM IR（モジュールごとに 1 本の `.ll`）・名前修飾 |
+| ⑤ 実行ファイル | clang 連携（`.ll` を並べてリンク） |
+| 診断 | 位置・ラベル・note・ヒント / UTF-8 の桁揃え |
 
-テスト **46 件**、ビルド警告 0、ASan/UBSan クリーン。
+### 規模
 
-進捗の詳細は [docs/roadmap.md](docs/roadmap.md) の進捗表を参照してください。
+| | 行数 |
+|---|---|
+| C 版コンパイラ（`src/`） | 7,609 |
+| **Mython 版コンパイラ（`selfhost/`）** | **6,519** |
+| 標準ライブラリ（`lib/`。Mython 製） | 267 |
+| ランタイム（`runtime/`。C） | 426 |
+| テスト | 336 ファイル |
+| ドキュメント | 26,850 行 |
+
+テスト **312 件**（＋セルフホストの比較検証 5 本）、ビルド警告 0、ASan/UBSan クリーン。
+
+### 検証のしかた
+
+```bash
+make test            # C 版のテスト + Mython 版との出力比較（5 本）
+make bootstrap       # 3 段ビルドと不動点の検証
+make bootstrap-test  # Mython 製コンパイラでテストを全部通す
+```
+
+```
+トークン列一致 348 件 / 字句エラーの内容一致 9 件      ← ch16
+AST 一致 311 件 / 構文エラーの内容一致 37 件           ← ch17
+型検査 一致 174 件 / 型エラーの内容一致 137 件         ← ch18
+IR 一致 174 件 / stage1 の IR で実行して一致 156 件    ← ch19
+```
+
+進捗と各章の成果は [docs/roadmap.md](docs/roadmap.md) を参照してください。
 
 ---
 

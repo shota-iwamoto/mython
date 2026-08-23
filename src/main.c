@@ -102,6 +102,16 @@ static Options parse_args(int argc, char **argv) {
     return o;
 }
 
+// ランタイム（runtime.o）の場所。
+// ★ 第20章：環境変数 MYTHON_RUNTIME_O があればそちらを使います。
+//   stage1（Mython 版）はビルド時に埋め込めないので、**両方が同じ規則で探す**
+//   ようにするためです（第18章の MYTHON_LIB_DIR と同じ手）。
+static const char *runtime_o(void) {
+    const char *env = getenv("MYTHON_RUNTIME_O");
+    if (env && env[0]) return env;
+    return MYTHON_RUNTIME_O;
+}
+
 // 出力ファイル名とモジュール名から .ll のパスを作る。
 //   a.out + main  → a.out.main.ll
 //
@@ -176,7 +186,7 @@ int main(int argc, char **argv) {
     sb_printf(&cmd, "clang %s", opt.opt_level);
     for (Module *m = mods; m; m = m->next) sb_printf(&cmd, " '%s'", m->ll_path);
     // ★ 第9章：ランタイム（runtime/runtime.c をコンパイルしたもの）をリンクする。
-    sb_printf(&cmd, " '%s' -o '%s'", MYTHON_RUNTIME_O, opt.output);
+    sb_printf(&cmd, " '%s' -o '%s'", runtime_o(), opt.output);
 
     int rc = system(sb_str(&cmd));
     if (rc != 0) {

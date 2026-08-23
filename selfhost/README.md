@@ -1,6 +1,7 @@
 # selfhost/ — Mython 製の Mython コンパイラ (stage1)
 
-**第16章から書き始めました。** 現在はコード生成まで（IR まで出せます）。
+**第16章から書き始め、第20章で完成しました。**
+**Mython コンパイラは自分自身をコンパイルできます**（`make bootstrap`）。
 
 `src/` の C 版と **1:1 で対応**させます。この対応を崩さないでください。
 崩すと「C 版のどこを見れば正解がわかるか」が失われます。
@@ -16,7 +17,7 @@
 | `src/types.c` | `selfhost/ast.my` に同居 | 第18章 ✅ |
 | `src/module.c` | `selfhost/module.my` | 第18章 ✅ |
 | `src/codegen.c` | `selfhost/codegen.my` | 第19章 ✅ |
-| `src/main.c` | `selfhost/main.my` | 第20章 |
+| `src/main.c` | `selfhost/main.my` | 第20章 ✅ |
 
 ## 検証方法
 
@@ -25,7 +26,8 @@
 ```bash
 # 第16章：トークン列が一致するか（tests/selfhost.sh が全ファイルで自動比較）
 make selfhost-test
-#   → トークン列一致 338 件 / 字句エラーの位置一致 9 件
+#   → トークン列一致 348 件 / AST 一致 311 件 / 型検査 一致 174 件 /
+#     IR 一致 174 件 / stage1 の IR で実行して一致 156 件
 #
 # 1 ファイルだけ見るなら
 ./build/mythonc --dump-tokens tests/cases/x.my > /tmp/c.txt
@@ -49,7 +51,8 @@ diff /tmp/c.ll /tmp/m.ll
 clang /tmp/m.ll build/runtime.o -o /tmp/x && /tmp/x
 
 # 第20章：不動点の検証
-make bootstrap    # stage2 == stage3 なら成功
+make bootstrap        # stage2 == stage3 なら成功
+make bootstrap-test   # Mython 製コンパイラでテストを全部通す
 ```
 
 **移植は機械的に行ってください。ここで独創性を発揮しないこと。**

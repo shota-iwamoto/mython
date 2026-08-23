@@ -3,7 +3,9 @@
 # 使い方:
 #   make            コンパイラをビルド
 #   make test       テストを全部実行（C 版のテスト + セルフホストの検証）
-#   make selfhost-test  Mython 版字句解析器と C 版のトークン列を比較
+#   make selfhost-test  Mython 版と C 版の出力を比較（5 本）
+#   make bootstrap      3 段ビルドと不動点の検証（第20章）
+#   make bootstrap-test Mython 製コンパイラでテストを全部通す
 #   make asan       AddressSanitizer 付きでビルド（メモリバグ調査用）
 #   make clean      生成物を削除
 
@@ -54,7 +56,7 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 DEPS    := $(OBJS:.o=.d)
 TARGET  := build/mythonc
 
-.PHONY: all clean test test-one selfhost-test asan info
+.PHONY: all clean test test-one selfhost-test bootstrap bootstrap-test asan info
 
 all: $(TARGET) $(RUNTIME_OBJ)
 
@@ -82,11 +84,27 @@ test: $(TARGET) $(RUNTIME_OBJ)
 test-one: $(TARGET) $(RUNTIME_OBJ)
 	@tests/run_tests.sh $(CASE)
 
-# ── セルフホストの検証（第16章）─────────────────────────────
-# Mython 製の字句解析器（stage1）が C 版と同じトークン列を出すか。
+# ── セルフホストの検証（第16〜19章）─────────────────────────
+# Mython 製のコンパイラ（stage1）が C 版と同じものを出すか。
+#   トークン列 → AST → 診断 → IR → 実行結果 の 5 本を比べます。
 #   ★ テストケースをそのまま検証データに使います。
 selfhost-test: $(TARGET) $(RUNTIME_OBJ)
 	@tests/selfhost.sh
+
+# ── ブートストラップ（第20章）───────────────────────────────
+# stage1（C 版がビルド）→ stage2（stage1 がビルド）→ stage3（stage2 がビルド）
+# stage2 == stage3 なら不動点に到達＝セルフホスト完成。
+bootstrap: $(TARGET) $(RUNTIME_OBJ)
+	@tests/bootstrap.sh
+
+# Mython 製コンパイラ（stage2）でテストを全部通す。
+#   ★ 「C 版と同じ出力を出す」より強い確認です。
+bootstrap-test: bootstrap
+	@MYTHONC=$(abspath build/boot/stage2) \
+	 MYTHON_LIB_DIR=$(abspath lib) \
+	 MYTHON_RUNTIME_O=$(abspath $(RUNTIME_OBJ)) \
+	 MYTHON_TARGET_TRIPLE=$(HOST_TRIPLE) \
+	 tests/run_tests.sh
 
 # ── AddressSanitizer ビルド ─────────────────────────────────
 # セグフォの原因が分からないときに使います。
