@@ -568,6 +568,21 @@ static Type *check_binop(Sema *s, Node *n) {
     return is_compare(n->op) ? ty_bool : l;
 }
 
+// ── 絞り込みの道具（実体は 15.5 節のところ）─────────────────
+//
+// ★ 第20章：短絡評価する条件式の「途中」でも絞り込みを効かせたいので、
+//    型と関数だけ先に見えるようにしておきます。
+#define NARROW_MAX 16
+
+typedef struct {
+    VarEntry *vars[NARROW_MAX];
+    Type *saved[NARROW_MAX];
+    int n;
+} NarrowSet;
+
+static void narrow_apply(Sema *s, Node *cond, bool positive, NarrowSet *ns);
+static void narrow_restore(NarrowSet *ns);
+
 // and / or は両辺が bool のみ（言語仕様 4.4）。
 // Python と違い int を真偽値として扱いません（truthiness を採用しない）。
 //
@@ -576,7 +591,18 @@ static Type *check_binop(Sema *s, Node *n) {
 //   bool に固定すれば and / or の型は常に bool です。
 static Type *check_logical(Sema *s, Node *n) {
     Type *l = check_expr(s, n->lhs);
+
+    // ★ 第20章：短絡評価するので、rhs は「lhs がある側に転んだとき」しか
+    //   評価されません。その側の絞り込みを rhs の検査中だけ効かせます。
+    //
+    //     a is not None and a.v == 0   ← and の rhs は lhs が真のときだけ見る
+    //     a is None     or  a.v == 0   ← or  の rhs は lhs が偽のときだけ見る
+    //
+    // ⚠️ 抜けたら必ず戻します（15.5 節と同じ「入る前に変えて、抜けたら戻す」）。
+    NarrowSet sc = {0};
+    narrow_apply(s, n->lhs, n->op == OP_AND, &sc);
     Type *r = check_expr(s, n->rhs);
+    narrow_restore(&sc);
 
     char *msg = diag_fmt("演算子 '%s' には bool が必要です", op_symbol(n->op));
     char *lbl = diag_fmt("演算子 '%s' はここです", op_symbol(n->op));
@@ -873,14 +899,6 @@ static void check_cond(Sema *s, const char *where, Node *stmt_node, Node *cond) 
 //   ・フィールド     … node.next を絞ると「その間 node.next が変わらないこと」を
 //                      保証しなければならない。メソッド呼び出し 1 つで壊れる
 
-#define NARROW_MAX 16
-
-typedef struct {
-    VarEntry *vars[NARROW_MAX];
-    Type *saved[NARROW_MAX];
-    int n;
-} NarrowSet;
-
 static void narrow_one(Sema *s, Node *var_node, NarrowSet *ns) {
     if (var_node->kind != ND_VAR) return;
 
@@ -907,9 +925,20 @@ static void narrow_apply(Sema *s, Node *cond, bool positive, NarrowSet *ns) {
         narrow_one(s, cond->lhs, ns);
     else if (cond->kind == ND_LOGICAL && cond->op == OP_AND && positive) {
         // a is not None and b is not None → 両方絞れる
-        // ⚠️ or は絞れません（どちらか一方しか保証されない）
         narrow_apply(s, cond->lhs, true, ns);
         narrow_apply(s, cond->rhs, true, ns);
+    }
+    else if (cond->kind == ND_LOGICAL && cond->op == OP_OR && !positive) {
+        // ★ 第20章：ド・モルガン。
+        //   not(a or b) = (not a) and (not b) なので、成り立たない側では両方絞れます。
+        //
+        //     if b is None or c is None:
+        //         return 0
+        //     # ← ここでは b も c も None ではない
+        //
+        // ⚠️ 「成り立つ側」の or は相変わらず絞れません（どちらか一方しか保証されない）。
+        narrow_apply(s, cond->lhs, false, ns);
+        narrow_apply(s, cond->rhs, false, ns);
     }
 }
 
@@ -1603,6 +1632,43 @@ static void check_stmt(Sema *s, Node *n) {
 
 // ── 入口 ───────────────────────────────────────────────────
 
+// この while から抜ける break があるか（第20章）。
+//
+// ⚠️ 入れ子のループの中には降りません。そこの break は内側のループのものです。
+//    if の中には降ります（break は条件付きで書くのが普通なので）。
+static bool has_break(Node *n) {
+    if (!n) return false;
+
+    switch (n->kind) {
+        case ND_BREAK:
+            return true;
+
+        case ND_WHILE:
+            return false;  // ★ 内側のループの break は、こちらには効かない
+
+        case ND_IF:
+            return has_break(n->body) || has_break(n->els);
+
+        case ND_BLOCK:
+            for (Node *st = n->body; st; st = st->next)
+                if (has_break(st)) return true;
+            return false;
+
+        default:
+            return false;
+    }
+}
+
+// 戻らない組み込み（panic / exit）の呼び出しか（第20章）。
+//
+// ★ ランタイム側で _Noreturn が付いている 2 つと、ここの判定は対になっています。
+//   片方だけ変えると「sema は通すのに実行時には戻ってくる」ことになります。
+static bool never_returns_call(Node *n) {
+    if (n->kind != ND_CALL || !n->builtin) return false;
+    return strcmp(n->builtin->impl, "my_panic") == 0 ||
+           strcmp(n->builtin->impl, "my_exit") == 0;
+}
+
 // この文を実行したら、必ず関数から抜けるか（型システム 6.1）。
 //
 // ⚠️ 保守的に判定します。「実際には到達しない」経路でも return を要求します。
@@ -1628,7 +1694,17 @@ static bool always_returns(Node *n) {
                 if (always_returns(st)) return true;
             return false;
 
-        // while True: は break が無ければ抜けないが、v1 では判定しない
+        case ND_WHILE:
+            // ★ 第20章：while True: は break が無ければ抜けない。
+            //   条件が「True というリテラルそのもの」のときだけ見ます。
+            //   変数や式は追いません（保守的でよい）。
+            return n->lhs && n->lhs->kind == ND_BOOL && n->lhs->ival != 0 &&
+                   !has_break(n->body);
+
+        case ND_CALL:
+            // ★ 第20章：panic() / exit() を呼んだら、その先へは進まない。
+            return never_returns_call(n);
+
         default:
             return false;
     }

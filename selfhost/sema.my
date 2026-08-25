@@ -492,7 +492,19 @@ class Sema:
         lhs: ast.Node = unwrap_node(n.lhs)
         rhs: ast.Node = unwrap_node(n.rhs)
         l: ast.Type = self.check_expr(lhs)
+
+        # ★ 第20章：短絡評価するので、rhs は「lhs がある側に転んだとき」しか
+        #   評価されません。その側の絞り込みを rhs の検査中だけ効かせます。
+        #
+        #     a is not None and a.v == 0   ← and の rhs は lhs が真のときだけ見る
+        #     a is None     or  a.v == 0   ← or  の rhs は lhs が偽のときだけ見る
+        #
+        # ⚠️ 抜けたら必ず戻す（15.5 節と同じ「入る前に変えて、抜けたら戻す」）。
+        svars: list[types.VarEntry] = []
+        stypes: list[ast.Type] = []
+        self.narrow_apply(lhs, n.op == ast.OP_AND, svars, stypes)
         r: ast.Type = self.check_expr(rhs)
+        self.narrow_restore(svars, stypes)
 
         msg: str = "演算子 '" + ast.op_symbol(n.op) + "' には bool が必要です"
         lbl: str = "演算子 '" + ast.op_symbol(n.op) + "' はここです"
@@ -768,9 +780,19 @@ class Sema:
         elif c.kind == ast.ND_BINOP and c.op == ast.OP_IS and not positive:
             self.narrow_one(unwrap_node(c.lhs), saved, saved_types)
         elif c.kind == ast.ND_LOGICAL and c.op == ast.OP_AND and positive:
-            # ⚠️ or は絞れない（どちらか一方しか保証されない）
             self.narrow_apply(c.lhs, True, saved, saved_types)
             self.narrow_apply(c.rhs, True, saved, saved_types)
+        elif c.kind == ast.ND_LOGICAL and c.op == ast.OP_OR and not positive:
+            # ★ 第20章：ド・モルガン。
+            #   not(a or b) = (not a) and (not b) なので、成り立たない側では両方絞れる。
+            #
+            #     if b is None or c is None:
+            #         return 0
+            #     # ← ここでは b も c も None ではない
+            #
+            # ⚠️ 「成り立つ側」の or は相変わらず絞れない（一方しか保証されない）。
+            self.narrow_apply(c.lhs, False, saved, saved_types)
+            self.narrow_apply(c.rhs, False, saved, saved_types)
 
     def narrow_restore(self, saved: list[types.VarEntry],
                        saved_types: list[ast.Type]) -> None:
@@ -1346,6 +1368,43 @@ class Sema:
                             ast.type_name(want) + "' です",
                             self.no_implicit_hint(got, want))
 
+    # この while から抜ける break があるか（第20章）
+    #
+    # ⚠️ 入れ子のループの中には降りない。そこの break は内側のループのもの。
+    #    if の中には降りる（break は条件付きで書くのが普通なので）。
+    def has_break(self, n: ast.Node | None) -> bool:
+        if n is None:
+            return False
+        node: ast.Node = n
+
+        if node.kind == ast.ND_BREAK:
+            return True
+
+        if node.kind == ast.ND_WHILE:
+            return False        # ★ 内側のループの break は、こちらには効かない
+
+        if node.kind == ast.ND_IF:
+            return self.has_break(node.body) or self.has_break(node.els)
+
+        if node.kind == ast.ND_BLOCK:
+            st: ast.Node | None = node.body
+            while st is not None:
+                if self.has_break(st):
+                    return True
+                st = st.next
+            return False
+
+        return False
+
+    # 戻らない組み込み（panic / exit）の呼び出しか（第20章）
+    #
+    # ★ ランタイム側で _Noreturn が付いている 2 つと、ここの判定は対になっている。
+    #   片方だけ変えると「sema は通すのに実行時には戻ってくる」ことになる。
+    def never_returns_call(self, node: ast.Node) -> bool:
+        if node.kind != ast.ND_CALL:
+            return False
+        return node.builtin == "my_panic" or node.builtin == "my_exit"
+
     # この文を実行したら、必ず関数から抜けるか（型システム 6.1）
     def always_returns(self, n: ast.Node | None) -> bool:
         if n is None:
@@ -1368,6 +1427,21 @@ class Sema:
                     return True
                 st = st.next
             return False
+
+        if node.kind == ast.ND_WHILE:
+            # ★ 第20章：while True: は break が無ければ抜けない。
+            #   条件が「True というリテラルそのもの」のときだけ見る。
+            #   変数や式は追わない（保守的でよい）。
+            if node.lhs is None:
+                return False
+            cond: ast.Node = unwrap_node(node.lhs)
+            if cond.kind != ast.ND_BOOL or cond.ival == 0:
+                return False
+            return not self.has_break(node.body)
+
+        if node.kind == ast.ND_CALL:
+            # ★ 第20章：panic() / exit() を呼んだら、その先へは進まない。
+            return self.never_returns_call(node)
 
         return False
 
